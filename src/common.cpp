@@ -111,6 +111,23 @@ static uint32_t parse_color(const std::string& s, uint32_t def) {
     } catch (...) { return def; }
 }
 
+static void clamp_clicker_settings(ClickerSettings& cl) {
+    if (cl.cpsLeft10 < 5) cl.cpsLeft10 = 5;
+    if (cl.cpsRight10 < 5) cl.cpsRight10 = 5;
+    if (cl.cpsMax < 20) cl.cpsMax = 20;
+    if (cl.cpsMax > 500) cl.cpsMax = 500;
+    if (cl.cpsLeft10 > cl.cpsMax * 10) cl.cpsLeft10 = cl.cpsMax * 10;
+    if (cl.cpsRight10 > cl.cpsMax * 10) cl.cpsRight10 = cl.cpsMax * 10;
+    if (cl.randomRange < 1) cl.randomRange = 1;
+    if (cl.randomRange > 5) cl.randomRange = 5;
+    if (cl.humanizeMode < 0) cl.humanizeMode = 0;
+    if (cl.humanizeMode > 3) cl.humanizeMode = 3;
+    if (cl.humanizeLevel < 1) cl.humanizeLevel = 1;
+    if (cl.humanizeLevel > 5) cl.humanizeLevel = 5;
+    if (cl.autoStopSeconds < 1) cl.autoStopSeconds = 1;
+    if (cl.autoStopSeconds > 3600) cl.autoStopSeconds = 3600;
+}
+
 void config_load(EspConfig& cfg) {
     std::wstring path = dll_directory() + L"esp.ini";
     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
@@ -128,6 +145,7 @@ void config_load(EspConfig& cfg) {
 
     std::string section;
     std::string line;
+    bool loadedProfile[EspConfig::kClickerProfiles] = {false, false, false, false};
     for (size_t i = 0; i <= data.size(); ++i) {
         char c = (i < data.size()) ? data[i] : '\n';
         if (c == '\n') {
@@ -169,8 +187,20 @@ void config_load(EspConfig& cfg) {
                 else if (key == "renderHz") seti(cfg.renderHz);
                 else if (key == "showTrajectory") set(cfg.showTrajectory);
                 else if (key == "trajectoryTicks") seti(cfg.trajectoryTicks);
-            } else if (section == "clicker") {
-                ClickerSettings& cl = cfg.clicker;
+            } else if (section == "clicker" || section.rfind("clickerProfile", 0) == 0) {
+                ClickerSettings* pcl = nullptr;
+                if (section == "clicker") {
+                    pcl = &cfg.clicker;
+                    if (key == "activeProfile") seti(cfg.activeProfile);
+                } else {
+                    int idx = atoi(section.c_str() + 14) - 1;
+                    if (idx >= 0 && idx < EspConfig::kClickerProfiles) {
+                        pcl = &cfg.profiles[idx];
+                        loadedProfile[idx] = true;
+                    }
+                }
+                if (!pcl) { line.clear(); continue; }
+                ClickerSettings& cl = *pcl;
                 if (key == "enabled") set(cl.enabled);
                 else if (key == "toggleKey") seti(cl.toggleKey);
                 else if (key == "leftEnabled") set(cl.leftEnabled);
@@ -205,22 +235,18 @@ void config_load(EspConfig& cfg) {
         }
     }
 
-    // 数值域钳制（配置被手改坏时防御）
-    ClickerSettings& cl = cfg.clicker;
-    if (cl.cpsLeft10 < 5) cl.cpsLeft10 = 5;
-    if (cl.cpsRight10 < 5) cl.cpsRight10 = 5;
-    if (cl.cpsMax < 20) cl.cpsMax = 20;
-    if (cl.cpsMax > 500) cl.cpsMax = 500;
-    if (cl.cpsLeft10 > cl.cpsMax * 10) cl.cpsLeft10 = cl.cpsMax * 10;
-    if (cl.cpsRight10 > cl.cpsMax * 10) cl.cpsRight10 = cl.cpsMax * 10;
-    if (cl.randomRange < 1) cl.randomRange = 1;
-    if (cl.randomRange > 5) cl.randomRange = 5;
-    if (cl.humanizeMode < 0) cl.humanizeMode = 0;
-    if (cl.humanizeMode > 3) cl.humanizeMode = 3;
-    if (cl.humanizeLevel < 1) cl.humanizeLevel = 1;
-    if (cl.humanizeLevel > 5) cl.humanizeLevel = 5;
-    if (cl.autoStopSeconds < 1) cl.autoStopSeconds = 1;
-    if (cl.autoStopSeconds > 3600) cl.autoStopSeconds = 3600;
+    if (cfg.activeProfile < 0) cfg.activeProfile = 0;
+    if (cfg.activeProfile >= EspConfig::kClickerProfiles) cfg.activeProfile = 0;
+
+    bool anyProfile = false;
+    for (int i = 0; i < EspConfig::kClickerProfiles; ++i) anyProfile = anyProfile || loadedProfile[i];
+    if (anyProfile) {
+        cfg.clicker = cfg.profiles[cfg.activeProfile];
+    } else {
+        for (int i = 0; i < EspConfig::kClickerProfiles; ++i) cfg.profiles[i] = cfg.clicker;
+    }
+    clamp_clicker_settings(cfg.clicker);
+    for (int i = 0; i < EspConfig::kClickerProfiles; ++i) clamp_clicker_settings(cfg.profiles[i]);
 }
 
 void config_save(const EspConfig& cfg) {
@@ -251,27 +277,34 @@ void config_save(const EspConfig& cfg) {
     line((std::string("showTrajectory = ") + b2s(cfg.showTrajectory) + "           ; 渲染弹射物预测轨迹").c_str());
     line((std::string("trajectoryTicks = ") + std::to_string(cfg.trajectoryTicks) + "            ; 轨迹预测长度（游戏 tick）").c_str());
 
-    const ClickerSettings& cl = cfg.clicker;
-    line("[clicker]");
-    line((std::string("enabled = ") + b2s(cl.enabled) + "              ; 注入后初始是否启用连点").c_str());
-    line((std::string("toggleKey = ") + std::to_string(cl.toggleKey) + "               ; VK_MBUTTON = 4").c_str());
-    line((std::string("leftEnabled = ") + b2s(cl.leftEnabled)).c_str());
-    line((std::string("rightEnabled = ") + b2s(cl.rightEnabled)).c_str());
-    line((std::string("keep = ") + b2s(cl.keep) + "                 ; 保持模式：无需按住鼠标").c_str());
-    line((std::string("cpsLeft10 = ") + std::to_string(cl.cpsLeft10) + "             ; 左键 CPS*10（100=10.0CPS）").c_str());
-    line((std::string("cpsRight10 = ") + std::to_string(cl.cpsRight10) + "             ; 右键 CPS*10").c_str());
-    line((std::string("cpsMax = ") + std::to_string(cl.cpsMax) + "               ; CPS 上限（20..500）").c_str());
-    line((std::string("randomEnabled = ") + b2s(cl.randomEnabled) + "         ; 随机 CPS 波动").c_str());
-    line((std::string("randomRange = ") + std::to_string(cl.randomRange) + "               ; 随机波动 ±CPS（1..5）").c_str());
-    line((std::string("humanizeMode = ") + std::to_string(cl.humanizeMode) + "             ; 0=均匀 1=双击 2=呼吸 3=疲劳").c_str());
-    line((std::string("humanizeLevel = ") + std::to_string(cl.humanizeLevel) + "             ; 拟人化强度（1..5）").c_str());
-    line((std::string("autoStopEnabled = ") + b2s(cl.autoStopEnabled) + "        ; 定时自动停止").c_str());
-    line((std::string("autoStopSeconds = ") + std::to_string(cl.autoStopSeconds) + "            ; N 秒后自动停止").c_str());
-    line((std::string("attackGate = ") + b2s(cl.attackGate) + "           ; 仅准星目标可攻击时左键连点").c_str());
-    line((std::string("attackGateKey = ") + std::to_string(cl.attackGateKey) + "              ; VK_F6 = 117").c_str());
-    line((std::string("placeGate = ") + b2s(cl.placeGate) + "            ; 仅手持方块时右键连点").c_str());
-    line((std::string("placeGateKey = ") + std::to_string(cl.placeGateKey) + "              ; VK_F7 = 118").c_str());
-    line((std::string("cursorGate = ") + b2s(cl.cursorGate) + "           ; 光标可见时暂停连点").c_str());
+    auto saveClicker = [&](const ClickerSettings& cl, const std::string& sectionName, bool withActive) {
+        line(sectionName.c_str());
+        if (withActive)
+            line((std::string("activeProfile = ") + std::to_string(cfg.activeProfile)).c_str());
+        line((std::string("enabled = ") + b2s(cl.enabled) + "              ; 注入后初始是否启用连点").c_str());
+        line((std::string("toggleKey = ") + std::to_string(cl.toggleKey) + "               ; VK_MBUTTON = 4").c_str());
+        line((std::string("leftEnabled = ") + b2s(cl.leftEnabled)).c_str());
+        line((std::string("rightEnabled = ") + b2s(cl.rightEnabled)).c_str());
+        line((std::string("keep = ") + b2s(cl.keep) + "                 ; 保持模式：无需按住鼠标").c_str());
+        line((std::string("cpsLeft10 = ") + std::to_string(cl.cpsLeft10) + "             ; 左键 CPS*10（100=10.0CPS）").c_str());
+        line((std::string("cpsRight10 = ") + std::to_string(cl.cpsRight10) + "             ; 右键 CPS*10").c_str());
+        line((std::string("cpsMax = ") + std::to_string(cl.cpsMax) + "               ; CPS 上限（20..500）").c_str());
+        line((std::string("randomEnabled = ") + b2s(cl.randomEnabled) + "         ; 随机 CPS 波动").c_str());
+        line((std::string("randomRange = ") + std::to_string(cl.randomRange) + "               ; 随机波动 ±CPS（1..5）").c_str());
+        line((std::string("humanizeMode = ") + std::to_string(cl.humanizeMode) + "             ; 0=均匀 1=双击 2=呼吸 3=疲劳").c_str());
+        line((std::string("humanizeLevel = ") + std::to_string(cl.humanizeLevel) + "             ; 拟人化强度（1..5）").c_str());
+        line((std::string("autoStopEnabled = ") + b2s(cl.autoStopEnabled) + "        ; 定时自动停止").c_str());
+        line((std::string("autoStopSeconds = ") + std::to_string(cl.autoStopSeconds) + "            ; N 秒后自动停止").c_str());
+        line((std::string("attackGate = ") + b2s(cl.attackGate) + "           ; 仅准星目标可攻击时左键连点").c_str());
+        line((std::string("attackGateKey = ") + std::to_string(cl.attackGateKey) + "              ; VK_F6 = 117").c_str());
+        line((std::string("placeGate = ") + b2s(cl.placeGate) + "            ; 仅手持方块时右键连点").c_str());
+        line((std::string("placeGateKey = ") + std::to_string(cl.placeGateKey) + "              ; VK_F7 = 118").c_str());
+        line((std::string("cursorGate = ") + b2s(cl.cursorGate) + "           ; 光标可见时暂停连点").c_str());
+    };
+
+    saveClicker(cfg.clicker, "[clicker]", true);
+    for (int i = 0; i < EspConfig::kClickerProfiles; ++i)
+        saveClicker(cfg.profiles[i], "[clickerProfile" + std::to_string(i + 1) + "]", false);
 
     line("[colors]");
     char cb[64];

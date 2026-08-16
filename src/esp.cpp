@@ -609,6 +609,7 @@ static void project_other_bow_predicts(const CamData& cam,
 enum MenuRow {
     M_CLICKER = 0,
     M_ESP,
+    M_PROFILE,
     M_LEFT,
     M_LEFT_CPS,
     M_LEFT_PRESET,
@@ -635,6 +636,7 @@ enum MenuRow {
 static const wchar_t* kHumanNames[4] = { L"均匀", L"双击连招", L"呼吸波动", L"疲劳递减" };
 
 static void commit_clicker_config() {
+    g_cfg.profiles[g_cfg.activeProfile] = g_cfg.clicker;
     clicker_apply_settings(g_cfg.clicker);
     config_save(g_cfg);
 }
@@ -644,6 +646,7 @@ static void on_clicker_hotkey_changed() {
     std::lock_guard<std::mutex> lock(g_clickerCfgMutex);
     ClickerSnapshot cs = clicker_snapshot();
     g_cfg.clicker = cs.settings;
+    g_cfg.profiles[g_cfg.activeProfile] = cs.settings;
     config_save(g_cfg);
 }
 
@@ -666,6 +669,15 @@ static void menu_adjust(int row, int dir, bool fast) {
         bool next = !g_espEnabled.load(std::memory_order_acquire);
         g_espEnabled.store(next, std::memory_order_release);
         g_cfg.enabled = next;
+        break;
+    }
+    case M_PROFILE: {
+        g_cfg.profiles[g_cfg.activeProfile] = g_cfg.clicker;
+        int next = g_cfg.activeProfile + dir;
+        if (next < 0) next = EspConfig::kClickerProfiles - 1;
+        if (next >= EspConfig::kClickerProfiles) next = 0;
+        g_cfg.activeProfile = next;
+        g_cfg.clicker = g_cfg.profiles[next];
         break;
     }
     case M_LEFT:  cl.leftEnabled = !cl.leftEnabled; break;
@@ -939,6 +951,12 @@ static void draw_menu(Overlay& ov, int w, int h) {
     ov.drawText((float)tx, (float)ty, buf, colAcc, 14);
     ty = panelY + 28;
 
+    int activeProfile = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_clickerCfgMutex);
+        activeProfile = g_cfg.activeProfile;
+    }
+
     std::wstring on = L"开", off = L"关";
     int cursor = g_menuCursor.load(std::memory_order_relaxed);
     for (int i = 0; i < M_COUNT; ++i) {
@@ -948,6 +966,7 @@ static void draw_menu(Overlay& ov, int w, int h) {
         switch (i) {
         case M_CLICKER:      label = L"连点器"; value = cs.running ? on : off; color = cs.running ? colOn : colOff; break;
         case M_ESP:          label = L"ESP"; value = g_espEnabled.load() ? on : off; color = g_espEnabled.load() ? colOn : colOff; break;
+        case M_PROFILE:      label = L"配置方案"; swprintf(buf, 64, L"方案 %d", activeProfile + 1); value = buf; color = colAcc; break;
         case M_LEFT:         label = L"左键连点"; value = cl.leftEnabled ? on : off; color = cl.leftEnabled ? colOn : colOff; break;
         case M_LEFT_CPS:     label = L"左键 CPS"; swprintf(buf, 64, L"%.1f", cl.cpsLeft10 / 10.0); value = buf; color = colAcc; break;
         case M_LEFT_PRESET:  label = L"左键预设"; swprintf(buf, 64, L"6/10/15/20/30/40"); value = buf; color = colAcc; break;

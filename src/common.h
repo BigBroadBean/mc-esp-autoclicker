@@ -84,7 +84,10 @@ struct EspConfig {
     int     trajectoryTicks  = 40;          // 轨迹预测长度（游戏 tick 数，20 tick = 1 秒）
 
     // 连点器
-    ClickerSettings clicker;
+    ClickerSettings clicker;             // 当前激活方案（运行时使用）
+    static constexpr int kClickerProfiles = 4;
+    ClickerSettings profiles[4];          // 4 套配置方案（对应 AutoClicker 的方案槽）
+    int             activeProfile = 0;    // 0..3
 
     uint32_t colPlayer  = 0xFF5555;         // 玩家：红
     uint32_t colMob     = 0xFFAA00;         // 生物：橙

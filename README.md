@@ -25,6 +25,7 @@ Minecraft 1.20.1 Forge 47.4.10 注入式 **ESP + 连点器** 一体化 DLL。
 
 ### 连点器
 
+- 4 套配置方案（Profiles），菜单内一键切换，整套连点参数独立保存
 - 左右键独立连点，CPS 独立可调（0.1 CPS 精度）
 - 6 / 10 / 15 / 20 / 30 / 40 CPS 快捷预设（左右键独立）
 - 保持模式：无需按住鼠标即可连点
@@ -73,7 +74,7 @@ canPlace  = player.getMainHandItem().getItem() instanceof BlockItem
 | `Enter` | 切换布尔项；在热键项目上按 Enter 后按任意键绑定 |
 | `Esc` | 关闭菜单 / 取消热键绑定 |
 
-菜单项：连点器总开关、ESP 开关、左/右键连点、左/右键 CPS 与预设、
+菜单项：连点器总开关、ESP 开关、配置方案、左/右键连点、左/右键 CPS 与预设、
 保持模式、连点热键、攻击门控、放置门控、光标门控、随机 CPS、随机范围、
 拟人化模式与强度、CPS 上限、定时停止、门控热键。
 
@@ -143,7 +144,8 @@ DLL 不链接 `jvm.dll`，运行时通过 `JNI_GetCreatedJavaVMs` 动态定位 J
 DLL 启动时读取自身同目录 `esp.ini`；不存在时自动生成默认配置。
 
 - `[esp]`：ESP 渲染参数，`menuKey` 为菜单呼出键。
-- `[clicker]`：全部连点器参数与热键。
+- `[clicker]`：当前激活方案与热键，`activeProfile` 为当前方案（0..3）。
+- `[clickerProfile1]`..`[clickerProfile4]`：4 套连点器方案槽。
 - `[colors]`：ESP 颜色。
 
 数值范围：
