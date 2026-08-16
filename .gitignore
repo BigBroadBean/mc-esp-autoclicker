@@ -1,0 +1,25 @@
+# ---- 日志 / 运行时生成文件 ----
+*.log
+esp_log.txt
+esp_log_new.txt
+esp_shm.txt
+/esp.ini
+
+# ---- 编译中间文件 ----
+*.o
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+.vs/
+.zcode/
+
+# ---- 冒烟测试可执行文件 ----
+tools/smoke_host.exe
+
+# ---- 系统文件 ----
+Thumbs.db
+Desktop.ini
+__pycache__/
+*.pyc
