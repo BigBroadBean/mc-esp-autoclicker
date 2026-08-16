@@ -22,20 +22,19 @@ int main() {
     ShowWindow(hwnd, SW_SHOW);
     SetForegroundWindow(hwnd);
 
-    wchar_t dll[MAX_PATH] = L"mc_esp.dll";
-    HMODULE mod = LoadLibraryW(dll);
+    // 固定加载仓库根目录的 mc_esp.dll，避免测试进程污染 Injector 目录的默认配置
+    wchar_t exePath[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    wchar_t* slash = wcsrchr(exePath, L'\\');
+    if (slash) wcscpy(slash + 1, L"..\\mc_esp.dll");
+    wchar_t dllFull[MAX_PATH] = {};
+    GetFullPathNameW(exePath, MAX_PATH, dllFull, nullptr);
+    printf("dll=%ls\n", dllFull);
+    HMODULE mod = LoadLibraryW(dllFull);
     printf("LoadLibrary=%p err=%lu\n", mod, GetLastError());
     if (!mod) return 3;
 
-    // 等待 ESP 渲染线程进入宿主循环，再打开菜单验证鼠标捕获切换
-    Sleep(300);
-    keybd_event(VK_INSERT, 0, 0, 0);
-    keybd_event(VK_INSERT, 0, KEYEVENTF_KEYUP, 0);
-    Sleep(400);
-    keybd_event(VK_INSERT, 0, 0, 0);
-    keybd_event(VK_INSERT, 0, KEYEVENTF_KEYUP, 0);
-    Sleep(200);
-
+    // 本测试只验证加载/卸载与线程生命周期，不打开菜单，避免改写任何配置
     for (int i = 0; i < 50; ++i) {
         MSG m;
         while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) {
