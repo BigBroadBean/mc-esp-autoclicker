@@ -769,6 +769,7 @@ static void menu_adjust(int row, int dir, bool fast) {
 static bool menu_key_is_nav(int vk) {
     return vk == VK_INSERT || vk == VK_ESCAPE || vk == VK_UP || vk == VK_DOWN ||
            vk == VK_LEFT || vk == VK_RIGHT || vk == VK_RETURN ||
+           vk == VK_LBUTTON || vk == VK_RBUTTON ||
            vk == VK_LSHIFT || vk == VK_RSHIFT || vk == VK_SHIFT ||
            vk == VK_LCONTROL || vk == VK_RCONTROL || vk == VK_CONTROL ||
            vk == VK_LMENU || vk == VK_RMENU || vk == VK_MENU;
