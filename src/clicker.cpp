@@ -18,6 +18,7 @@ static std::mutex        g_mutex;
 static ClickerSettings   g_settings;
 static HWND              g_gameHwnd = nullptr;
 static std::atomic<bool> g_running{false};        // 连点总开关
+static std::atomic<bool> g_menuOpen{false};       // Insert 菜单打开时暂停连点
 static std::atomic<bool> g_threadRunning{false};  // 工作线程是否已创建
 static std::atomic<bool> g_stop{false};           // 工作线程退出标志
 static HANDLE            g_threadHandle = nullptr;
@@ -114,6 +115,10 @@ void clicker_set_running(bool on) {
 
 void clicker_toggle_running() {
     clicker_set_running(!g_running.load(std::memory_order_acquire));
+}
+
+void clicker_set_menu_open(bool open) {
+    g_menuOpen.store(open, std::memory_order_release);
 }
 
 void clicker_set_combat(bool ready, bool canAttack, bool canPlace) {
@@ -323,6 +328,7 @@ static DWORD WINAPI clicker_thread_main(LPVOID) {
         bool canPlaceGate = !cfg.placeGate ||
                             (combatFresh && g_canPlace.load(std::memory_order_acquire));
         bool cursorGate = !cfg.cursorGate || !cursor_showing();
+        bool menuGate = !g_menuOpen.load(std::memory_order_acquire);
 
         bool fgOk = g_gameHwnd && IsWindow(g_gameHwnd) && !IsIconic(g_gameHwnd);
         if (fgOk) {
@@ -336,13 +342,13 @@ static DWORD WINAPI clicker_thread_main(LPVOID) {
 
         if (!canAtkGate) releaseLeft();
         if (!canPlaceGate) releaseRight();
-        if (!cursorGate || !fgOk || !running) {
+        if (!cursorGate || !menuGate || !fgOk || !running) {
             releaseLeft();
             releaseRight();
         }
 
-        bool leftActive = running && cfg.leftEnabled && fgOk && canAtkGate && cursorGate;
-        bool rightActive = running && cfg.rightEnabled && fgOk && canPlaceGate && cursorGate;
+        bool leftActive = running && cfg.leftEnabled && fgOk && canAtkGate && cursorGate && menuGate;
+        bool rightActive = running && cfg.rightEnabled && fgOk && canPlaceGate && cursorGate && menuGate;
 
         bool leftHeld = leftActive && (key_down(VK_LBUTTON) || cfg.keep);
         if (leftHeld) {

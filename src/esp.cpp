@@ -599,12 +599,17 @@ static void project_other_bow_predicts(const CamData& cam,
 }
 
 // ============================================================
-// Insert 菜单（用本项目 Overlay GDI 绘制；键盘操作，不创建外部窗口）
+// Insert 菜单（鼠标可交互 + 滑块 + 离屏缓存绘制）
 //   Insert       呼出 / 关闭
-//   上 / 下      选择项目
-//   左 / 右      减小 / 增大数值，或循环选项（按住可连续调整）
+//   鼠标左键     点选行 / 拖拽滑块 / 点击面板外关闭
+//   ↑ / ↓        选择项目
+//   ← / →        减小 / 增大，或循环选项（按住可连续调整）
 //   Enter        切换布尔项；在热键项上按 Enter 后按任意键绑定
 //   Esc          关闭菜单 / 取消热键绑定
+//
+//   卡顿优化：菜单只在“状态变化 / 鼠标悬停变化 / 250ms 动态刷新”时
+//   离屏重绘一次，平时每帧仅 memcpy 缓存面板 + UpdateLayeredWindow，
+//   不再每帧重画 20+ 行文字与填充。
 // ============================================================
 enum MenuRow {
     M_CLICKER = 0,
@@ -635,10 +640,121 @@ enum MenuRow {
 
 static const wchar_t* kHumanNames[4] = { L"均匀", L"双击连招", L"呼吸波动", L"疲劳递减" };
 
+// ---- 菜单缓存与交互状态 ----
+struct MenuCache {
+    std::vector<uint32_t> px;
+    int w = 0, h = 0;
+    bool valid = false;
+};
+static MenuCache        g_menuCache;         // 只由游戏渲染线程访问
+static std::atomic<bool> g_menuDirty{true};
+static std::atomic<int>  g_menuHover{-1};
+static std::atomic<int>  g_menuDrag{-1};
+static DWORD             g_menuLastRenderMs = 0;   // 游戏线程专用
+
+static constexpr int kMenuRowH = 17;
+static constexpr int kMenuHeaderH = 26;
+static constexpr int kMenuFooterH = 26;
+
+static int menu_panel_height() {
+    return kMenuHeaderH + M_COUNT * kMenuRowH + kMenuFooterH;
+}
+
+static void menu_panel_rect(int w, int h, int& px, int& py, int& pw, int& ph) {
+    pw = (std::min)(400, w - 16);
+    ph = menu_panel_height();
+    px = w - pw - 10;
+    py = h - ph - 8;
+    if (py < 8) py = 8;
+}
+
+static int menu_hit_row(int py, int y) {
+    int rel = y - (py + kMenuHeaderH);
+    if (rel < 0) return -1;
+    int row = rel / kMenuRowH;
+    if (row >= M_COUNT) return -1;
+    return row;
+}
+
+static bool menu_is_slider(int row) {
+    return row == M_LEFT_CPS || row == M_RIGHT_CPS || row == M_RANDOM_RANGE ||
+           row == M_HUMAN_LEVEL || row == M_CPS_MAX || row == M_AUTOSTOP_SEC;
+}
+
+static void menu_slider_rect(int px, int pw, int y, int& x0, int& x1) {
+    x0 = px + 194;
+    x1 = px + pw - 14;
+    if (x1 < x0 + 20) x1 = x0 + 20;
+}
+
+static float menu_slider_norm(int row, const ClickerSettings& cl) {
+    switch (row) {
+    case M_LEFT_CPS: {
+        int max10 = cl.cpsMax * 10;
+        return (float)(cl.cpsLeft10 - 5) / (float)(max10 - 5);
+    }
+    case M_RIGHT_CPS: {
+        int max10 = cl.cpsMax * 10;
+        return (float)(cl.cpsRight10 - 5) / (float)(max10 - 5);
+    }
+    case M_RANDOM_RANGE: return (float)(cl.randomRange - 1) / 4.0f;
+    case M_HUMAN_LEVEL:  return (float)(cl.humanizeLevel - 1) / 4.0f;
+    case M_CPS_MAX:      return (float)(cl.cpsMax - 20) / 480.0f;
+    case M_AUTOSTOP_SEC:
+        return (float)((std::log((double)cl.autoStopSeconds) - std::log(1.0)) /
+                       (std::log(3600.0) - std::log(1.0)));
+    default: return 0.0f;
+    }
+}
+
+static void menu_slider_apply(int row, float t, ClickerSettings& cl) {
+    if (t < 0.0f) t = 0.0f;
+    if (t > 1.0f) t = 1.0f;
+    switch (row) {
+    case M_LEFT_CPS: {
+        int max10 = cl.cpsMax * 10;
+        int v = 5 + (int)(t * (float)(max10 - 5) + 0.5f);
+        if (v > max10) v = max10;
+        cl.cpsLeft10 = v;
+        break;
+    }
+    case M_RIGHT_CPS: {
+        int max10 = cl.cpsMax * 10;
+        int v = 5 + (int)(t * (float)(max10 - 5) + 0.5f);
+        if (v > max10) v = max10;
+        cl.cpsRight10 = v;
+        break;
+    }
+    case M_RANDOM_RANGE:
+        cl.randomRange = 1 + (int)(t * 4.0f + 0.5f);
+        break;
+    case M_HUMAN_LEVEL:
+        cl.humanizeLevel = 1 + (int)(t * 4.0f + 0.5f);
+        break;
+    case M_CPS_MAX: {
+        int v = 20 + (int)(t * 480.0f + 0.5f);
+        if (v > 500) v = 500;
+        cl.cpsMax = v;
+        int max10 = v * 10;
+        if (cl.cpsLeft10 > max10) cl.cpsLeft10 = max10;
+        if (cl.cpsRight10 > max10) cl.cpsRight10 = max10;
+        break;
+    }
+    case M_AUTOSTOP_SEC:
+        cl.autoStopSeconds = (int)(std::exp(std::log(1.0) +
+                                  t * (std::log(3600.0) - std::log(1.0))) + 0.5);
+        if (cl.autoStopSeconds < 1) cl.autoStopSeconds = 1;
+        if (cl.autoStopSeconds > 3600) cl.autoStopSeconds = 3600;
+        break;
+    default: break;
+    }
+}
+
 static void commit_clicker_config() {
     g_cfg.profiles[g_cfg.activeProfile] = g_cfg.clicker;
     clicker_apply_settings(g_cfg.clicker);
     config_save(g_cfg);
+    g_menuDirty.store(true, std::memory_order_release);
 }
 
 // 连点线程内热键修改攻击/放置门控后，把最新设置写回 g_cfg + esp.ini。
@@ -648,6 +764,7 @@ static void on_clicker_hotkey_changed() {
     g_cfg.clicker = cs.settings;
     g_cfg.profiles[g_cfg.activeProfile] = cs.settings;
     config_save(g_cfg);
+    g_menuDirty.store(true, std::memory_order_release);
 }
 
 static void menu_move(int dir) {
@@ -656,6 +773,7 @@ static void menu_move(int dir) {
     if (cur < 0) cur = M_COUNT - 1;
     if (cur >= M_COUNT) cur = 0;
     g_menuCursor.store(cur, std::memory_order_release);
+    g_menuDirty.store(true, std::memory_order_release);
 }
 
 static void menu_adjust(int row, int dir, bool fast) {
@@ -804,7 +922,101 @@ static bool key_down_any(int vk) {
     return vk != 0 && (GetAsyncKeyState(vk) & 0x8000) != 0;
 }
 
-// 渲染线程每 ~16ms 调用。只处理菜单键盘，不接触 JVM / 不创建窗口。
+static void menu_activate_row(int row) {
+    switch (row) {
+    case M_HOTKEY:
+    case M_ATTACK_KEY:
+    case M_PLACE_KEY:
+        g_menuCaptureTarget.store(row, std::memory_order_release);
+        g_menuCaptureKey.store(true, std::memory_order_release);
+        esp_log("[menu] 等待按下新热键…");
+        break;
+    case M_PROFILE:
+    case M_LEFT_PRESET:
+    case M_RIGHT_PRESET:
+    case M_HUMAN_MODE:
+        menu_adjust(row, 1, false);   // 鼠标点击这些行 = 循环到下一项
+        break;
+    default:
+        menu_adjust(row, 0, false);   // 布尔项点击切换
+        break;
+    }
+}
+
+// 鼠标拖拽/点击时实时改值；不在拖动中写盘，松开左键才 commit。
+static void menu_slider_set_from_x(int row, int x) {
+    // 使用当前覆盖层客户区宽高计算滑块轨道
+    RECT cr{};
+    if (g_overlay.hwnd()) GetClientRect(g_overlay.hwnd(), &cr);
+    int W = cr.right > 0 ? cr.right : 800;
+    int H = cr.bottom > 0 ? cr.bottom : 600;
+    int px = 0, pya = 0, pwv = 0, phv = 0;
+    menu_panel_rect(W, H, px, pya, pwv, phv);
+    int ry = pya + kMenuHeaderH + row * kMenuRowH;
+    int x0 = 0, x1 = 0;
+    menu_slider_rect(px, pwv, ry, x0, x1);
+    float t = (float)(x - x0) / (float)(x1 - x0);
+    menu_slider_apply(row, t, g_cfg.clicker);
+    clicker_apply_settings(g_cfg.clicker);
+    g_menuDirty.store(true, std::memory_order_release);
+}
+
+static void menu_poll_mouse() {
+    RECT cr{};
+    if (!g_overlay.hwnd() || !GetClientRect(g_overlay.hwnd(), &cr)) return;
+    int W = cr.right, H = cr.bottom;
+    if (W <= 0 || H <= 0) return;
+    int px = 0, py = 0, pw = 0, ph = 0;
+    menu_panel_rect(W, H, px, py, pw, ph);
+
+    POINT pt{};
+    GetCursorPos(&pt);
+    ScreenToClient(g_overlay.hwnd(), &pt);
+
+    bool down = key_down_any(VK_LBUTTON);
+    static bool prevDown = false;
+
+    if (down && !prevDown) {
+        prevDown = true;
+        // 面板外左键：关闭菜单
+        if (pt.x < px || pt.x >= px + pw || pt.y < py || pt.y >= py + ph) {
+            g_menuVisible.store(false, std::memory_order_release);
+            g_menuDirty.store(true, std::memory_order_release);
+            return;
+        }
+        int row = menu_hit_row(py, pt.y);
+        if (row >= 0) {
+            g_menuCursor.store(row, std::memory_order_release);
+            g_menuHover.store(row, std::memory_order_release);
+            g_menuDirty.store(true, std::memory_order_release);
+            if (menu_is_slider(row)) {
+                g_menuDrag.store(row, std::memory_order_release);
+                menu_slider_set_from_x(row, pt.x);
+            } else {
+                menu_activate_row(row);
+            }
+        }
+    } else if (!down && prevDown) {
+        prevDown = false;
+        if (g_menuDrag.load(std::memory_order_relaxed) >= 0) {
+            g_menuDrag.store(-1, std::memory_order_release);
+            commit_clicker_config();   // 拖动结束才写配置
+        }
+    } else if (down) {
+        int drag = g_menuDrag.load(std::memory_order_relaxed);
+        if (drag >= 0) menu_slider_set_from_x(drag, pt.x);
+    } else {
+        int row = (pt.x >= px && pt.x < px + pw && pt.y >= py && pt.y < py + ph)
+                      ? menu_hit_row(py, pt.y) : -1;
+        int old = g_menuHover.load(std::memory_order_relaxed);
+        if (row != old) {
+            g_menuHover.store(row, std::memory_order_release);
+            g_menuDirty.store(true, std::memory_order_release);
+        }
+    }
+}
+
+// 渲染线程每 ~16ms 调用。只处理菜单输入，不接触 JVM / 不创建窗口。
 static void menu_handle_input(HWND gameHwnd) {
     if (GetForegroundWindow() != gameHwnd || IsIconic(gameHwnd)) return;
     std::lock_guard<std::mutex> cfgLock(g_clickerCfgMutex);
@@ -826,8 +1038,8 @@ static void menu_handle_input(HWND gameHwnd) {
         prevEsc = key_down_any(VK_ESCAPE);
         if (key_down_any(VK_ESCAPE)) {
             g_menuCaptureKey.store(false, std::memory_order_release);
+            g_menuDirty.store(true, std::memory_order_release);
             esp_log("[menu] 取消热键绑定");
-            prevEsc = true;
             return;
         }
         for (int vk = 1; vk <= 254; ++vk) {
@@ -844,8 +1056,11 @@ static void menu_handle_input(HWND gameHwnd) {
     if (insert && !prevInsert) {
         bool next = !g_menuVisible.load(std::memory_order_acquire);
         g_menuVisible.store(next, std::memory_order_release);
+        g_menuDirty.store(true, std::memory_order_release);
         if (next) {
             g_menuCursor.store(0, std::memory_order_release);
+            g_menuHover.store(-1, std::memory_order_release);
+            g_menuDrag.store(-1, std::memory_order_release);
             esp_log("[menu] Insert 打开菜单");
         } else {
             esp_log("[menu] Insert 关闭菜单");
@@ -857,6 +1072,7 @@ static void menu_handle_input(HWND gameHwnd) {
     bool esc = key_down_any(VK_ESCAPE);
     if (esc && !prevEsc) {
         g_menuVisible.store(false, std::memory_order_release);
+        g_menuDirty.store(true, std::memory_order_release);
         prevEsc = true;
         return;
     }
@@ -904,52 +1120,20 @@ static void menu_handle_input(HWND gameHwnd) {
 
     if (enter && !prevEnter) {
         row = g_menuCursor.load(std::memory_order_relaxed);
-        switch (row) {
-        case M_HOTKEY:
-        case M_ATTACK_KEY:
-        case M_PLACE_KEY:
-            g_menuCaptureTarget.store(row, std::memory_order_release);
-            g_menuCaptureKey.store(true, std::memory_order_release);
-            esp_log("[menu] 等待按下新热键…");
-            break;
-        default:
-            menu_adjust(row, 0, fast);   // 布尔项：dir=0 走 toggle 分支
-            break;
-        }
+        menu_activate_row(row);
     }
     prevEnter = enter;
+
+    // ---- 鼠标：覆盖层在菜单打开期间已切换为可点击 ----
+    menu_poll_mouse();
 }
 
-// 游戏渲染线程调用：把菜单画到像素缓冲（已持有 g_overlayLock）。
-static void draw_menu(Overlay& ov, int w, int h) {
+// ============================================================
+// 菜单离屏绘制（只在 dirty / 250ms 动态刷新时执行一次）
+// ============================================================
+static void draw_menu_panel(Overlay& ov, int panelW, int panelH) {
     ClickerSnapshot cs = clicker_snapshot();
     const ClickerSettings& cl = cs.settings;
-
-    const int rowH = 17;
-    const int panelW = (std::min)(370, w - 16);
-    const int panelX = w - panelW - 10;
-    const int panelY = (std::max)(8, h / 2 - 230);
-    const int panelH = 28 + M_COUNT * rowH + 26;
-    const uint32_t colBg = 0x10131C;
-    const uint32_t colBorder = 0x35618F;
-    const uint32_t colSel = 0x1E3A5F;
-    const uint32_t colText = 0xE7EFFB;
-    const uint32_t colDim = 0x9AA7B8;
-    const uint32_t colAcc = 0x66A3FF;
-    const uint32_t colOn = 0x52D88C;
-    const uint32_t colOff = 0x8A93A3;
-
-    ov.fillRect((float)panelX, (float)panelY, (float)(panelX + panelW),
-                (float)(panelY + panelH), colBg);
-    ov.drawRect((float)panelX, (float)panelY, (float)(panelX + panelW),
-                (float)(panelY + panelH), colBorder, 1);
-
-    int tx = panelX + 10;
-    int ty = panelY + 6;
-    wchar_t buf[64];
-    swprintf(buf, 64, L"连点器菜单  [Insert 关闭]  CPS %d", cs.realtimeCps);
-    ov.drawText((float)tx, (float)ty, buf, colAcc, 14);
-    ty = panelY + 28;
 
     int activeProfile = 0;
     {
@@ -957,66 +1141,148 @@ static void draw_menu(Overlay& ov, int w, int h) {
         activeProfile = g_cfg.activeProfile;
     }
 
-    std::wstring on = L"开", off = L"关";
+    const uint32_t colBg = 0x10131C;
+    const uint32_t colBorder = 0x35618F;
+    const uint32_t colSel = 0x1E3A5F;
+    const uint32_t colHover = 0x24486F;
+    const uint32_t colText = 0xE7EFFB;
+    const uint32_t colDim = 0x9AA7B8;
+    const uint32_t colAcc = 0x66A3FF;
+    const uint32_t colOn = 0x52D88C;
+    const uint32_t colOff = 0x8A93A3;
+    const uint32_t colTrack = 0x2A3850;
+    const uint32_t colThumb = 0xDDE7F5;
+
+    ov.fillRectOpaque(0, 0, (float)panelW, (float)panelH, colBg);
+    ov.drawLine(0, 0, (float)panelW, 0, colBorder, 1);
+    ov.drawLine(0, (float)panelH - 1, (float)panelW, (float)panelH - 1, colBorder, 1);
+    ov.drawLine(0, 0, 0, (float)panelH, colBorder, 1);
+    ov.drawLine((float)panelW - 1, 0, (float)panelW - 1, (float)panelH, colBorder, 1);
+
+    wchar_t buf[80];
+    swprintf(buf, 80, L"连点器菜单  [Insert 关闭]  CPS %d", cs.realtimeCps);
+    ov.drawText(10, 5, buf, colAcc, 14);
+    ov.drawLine(8, (float)kMenuHeaderH - 2, (float)panelW - 8, (float)kMenuHeaderH - 2, colBorder, 1);
+
     int cursor = g_menuCursor.load(std::memory_order_relaxed);
+    int hover = g_menuHover.load(std::memory_order_relaxed);
+    int drag = g_menuDrag.load(std::memory_order_relaxed);
+    std::wstring on = L"开", off = L"关";
+
     for (int i = 0; i < M_COUNT; ++i) {
         const wchar_t* label = L"";
         std::wstring value;
         uint32_t color = colText;
+        bool slider = menu_is_slider(i);
         switch (i) {
         case M_CLICKER:      label = L"连点器"; value = cs.running ? on : off; color = cs.running ? colOn : colOff; break;
         case M_ESP:          label = L"ESP"; value = g_espEnabled.load() ? on : off; color = g_espEnabled.load() ? colOn : colOff; break;
-        case M_PROFILE:      label = L"配置方案"; swprintf(buf, 64, L"方案 %d", activeProfile + 1); value = buf; color = colAcc; break;
+        case M_PROFILE:      label = L"配置方案"; swprintf(buf, 80, L"方案 %d", activeProfile + 1); value = buf; color = colAcc; break;
         case M_LEFT:         label = L"左键连点"; value = cl.leftEnabled ? on : off; color = cl.leftEnabled ? colOn : colOff; break;
-        case M_LEFT_CPS:     label = L"左键 CPS"; swprintf(buf, 64, L"%.1f", cl.cpsLeft10 / 10.0); value = buf; color = colAcc; break;
-        case M_LEFT_PRESET:  label = L"左键预设"; swprintf(buf, 64, L"6/10/15/20/30/40"); value = buf; color = colAcc; break;
+        case M_LEFT_CPS:     label = L"左键 CPS"; swprintf(buf, 80, L"%.1f", cl.cpsLeft10 / 10.0); value = buf; color = colAcc; break;
+        case M_LEFT_PRESET:  label = L"左键预设"; value = L"6/10/15/20/30/40"; color = colAcc; break;
         case M_RIGHT:        label = L"右键连点"; value = cl.rightEnabled ? on : off; color = cl.rightEnabled ? colOn : colOff; break;
-        case M_RIGHT_CPS:    label = L"右键 CPS"; swprintf(buf, 64, L"%.1f", cl.cpsRight10 / 10.0); value = buf; color = colAcc; break;
-        case M_RIGHT_PRESET: label = L"右键预设"; swprintf(buf, 64, L"6/10/15/20/30/40"); value = buf; color = colAcc; break;
-        case M_KEEP:         label = L"保持模式(无需按住)"; value = cl.keep ? on : off; color = cl.keep ? colOn : colOff; break;
+        case M_RIGHT_CPS:    label = L"右键 CPS"; swprintf(buf, 80, L"%.1f", cl.cpsRight10 / 10.0); value = buf; color = colAcc; break;
+        case M_RIGHT_PRESET: label = L"右键预设"; value = L"6/10/15/20/30/40"; color = colAcc; break;
+        case M_KEEP:         label = L"保持模式"; value = cl.keep ? on : off; color = cl.keep ? colOn : colOff; break;
         case M_HOTKEY:       label = L"连点热键"; value = clicker_key_name(cl.toggleKey); color = colAcc; break;
         case M_ATTACK_GATE:  label = L"仅可攻击时左键"; value = cl.attackGate ? on : off; color = cl.attackGate ? colOn : colOff; break;
         case M_PLACE_GATE:   label = L"仅持方块时右键"; value = cl.placeGate ? on : off; color = cl.placeGate ? colOn : colOff; break;
         case M_CURSOR_GATE:  label = L"光标门控"; value = cl.cursorGate ? on : off; color = cl.cursorGate ? colOn : colOff; break;
         case M_RANDOM:       label = L"随机 CPS"; value = cl.randomEnabled ? on : off; color = cl.randomEnabled ? colOn : colOff; break;
-        case M_RANDOM_RANGE: label = L"随机范围"; swprintf(buf, 64, L"±%d CPS", cl.randomRange); value = buf; color = colAcc; break;
+        case M_RANDOM_RANGE: label = L"随机范围"; swprintf(buf, 80, L"±%d CPS", cl.randomRange); value = buf; color = colAcc; break;
         case M_HUMAN_MODE:   label = L"拟人化节奏"; value = kHumanNames[cl.humanizeMode & 3]; color = colAcc; break;
-        case M_HUMAN_LEVEL:  label = L"拟人化强度"; swprintf(buf, 64, L"%d / 5", cl.humanizeLevel); value = buf; color = colAcc; break;
-        case M_CPS_MAX:      label = L"CPS 上限"; swprintf(buf, 64, L"%d", cl.cpsMax); value = buf; color = colAcc; break;
+        case M_HUMAN_LEVEL:  label = L"拟人化强度"; swprintf(buf, 80, L"%d / 5", cl.humanizeLevel); value = buf; color = colAcc; break;
+        case M_CPS_MAX:      label = L"CPS 上限"; swprintf(buf, 80, L"%d", cl.cpsMax); value = buf; color = colAcc; break;
         case M_AUTOSTOP:     label = L"定时停止"; value = cl.autoStopEnabled ? on : off; color = cl.autoStopEnabled ? colOn : colOff; break;
-        case M_AUTOSTOP_SEC: label = L"停止秒数"; swprintf(buf, 64, L"%d 秒", cl.autoStopSeconds); value = buf; color = colAcc; break;
+        case M_AUTOSTOP_SEC: label = L"停止秒数"; swprintf(buf, 80, L"%d 秒", cl.autoStopSeconds); value = buf; color = colAcc; break;
         case M_ATTACK_KEY:   label = L"攻击门控热键"; value = clicker_key_name(cl.attackGateKey); color = colAcc; break;
         case M_PLACE_KEY:    label = L"放置门控热键"; value = clicker_key_name(cl.placeGateKey); color = colAcc; break;
         }
 
-        float ry = (float)(ty + i * rowH);
+        float ry = (float)(kMenuHeaderH + i * kMenuRowH);
         if (i == cursor) {
-            ov.fillRect((float)panelX + 3, ry, (float)(panelX + panelW) - 3,
-                        ry + rowH + 1, colSel);
+            ov.fillRectOpaque(3, ry, (float)panelW - 3, ry + kMenuRowH + 1, colSel);
+        } else if (i == hover) {
+            ov.fillRectAlpha(3, ry, (float)panelW - 3, ry + kMenuRowH + 1, colHover, 0.65f);
         }
+
         if (g_menuCaptureKey.load() && g_menuCaptureTarget.load() == i)
             value = L"按任意键…";
 
-        ov.drawText((float)tx, ry, label, i == cursor ? colText : colDim, 13);
-        float vw = ov.measureText(value, 13);
-        ov.drawText((float)(panelX + panelW) - 12 - vw, ry, value, i == cursor ? colAcc : color, 13);
+        ov.drawText(10, ry, label, i == cursor ? colText : colDim, 13);
+
+        if (slider) {
+            float vw = ov.measureText(value, 13);
+            ov.drawText(126, ry, value, i == cursor ? colAcc : color, 13);
+            int x0 = 0, x1 = 0;
+            menu_slider_rect(0, panelW, (int)ry, x0, x1);
+            float t = menu_slider_norm(i, cl);
+            float thumbX = x0 + t * (float)(x1 - x0);
+            ov.fillRectOpaque((float)x0, ry + 7, (float)x1, ry + 10, colTrack);
+            ov.fillRectOpaque((float)x0, ry + 7, thumbX, ry + 10, colAcc);
+            ov.fillRectOpaque(thumbX - 3, ry + 3, thumbX + 3, ry + 14, colThumb);
+        } else {
+            float vw = ov.measureText(value, 13);
+            ov.drawText((float)panelW - 12 - vw, ry, value, i == cursor ? colAcc : color, 13);
+        }
     }
 
-    int fy = panelY + 26 + M_COUNT * rowH + 4;
-    swprintf(buf, 64, L"状态  攻击:%s  放置:%s  %s",
+    int fy = kMenuHeaderH + M_COUNT * kMenuRowH + 4;
+    swprintf(buf, 80, L"状态  攻击:%s  放置:%s  %s",
              cs.combatReady ? (cs.canAttack ? L"可" : L"否") : L"未就绪",
              cs.combatReady ? (cs.canPlace ? L"可" : L"否") : L"未就绪",
              cs.running ? L"连点中" : L"已停止");
-    ov.drawText((float)tx, (float)fy, buf, colDim, 12);
+    ov.drawText(10, (float)fy, buf, colDim, 12);
+}
+
+static bool menu_need_render(int w, int h) {
+    int px = 0, py = 0, pw = 0, ph = 0;
+    menu_panel_rect(w, h, px, py, pw, ph);
+    if (!g_menuCache.valid || g_menuCache.w != pw || g_menuCache.h != ph)
+        return true;
+    if (g_menuDirty.load(std::memory_order_acquire))
+        return true;
+    return (int)(GetTickCount() - g_menuLastRenderMs) >= 250;
+}
+
+static void render_menu_cache(int w, int h) {
+    int px = 0, py = 0, pw = 0, ph = 0;
+    menu_panel_rect(w, h, px, py, pw, ph);
+    if (pw <= 0 || ph <= 0) return;
+
+    if ((int)g_menuCache.px.size() != pw * ph) {
+        g_menuCache.px.assign((size_t)pw * ph, 0);
+        g_menuCache.valid = false;
+    }
+    g_menuCache.w = pw;
+    g_menuCache.h = ph;
+
+    if (g_overlay.begin_offscreen(pw, ph, g_menuCache.px.data())) {
+        draw_menu_panel(g_overlay, pw, ph);
+        g_overlay.end_offscreen();
+        g_menuCache.valid = true;
+    }
+    g_menuDirty.store(false, std::memory_order_release);
+    g_menuLastRenderMs = GetTickCount();
+}
+
+static void blit_menu_cache(int w, int h) {
+    if (!g_menuCache.valid) return;
+    int px = 0, py = 0, pw = 0, ph = 0;
+    menu_panel_rect(w, h, px, py, pw, ph);
+    if (pw != g_menuCache.w || ph != g_menuCache.h) return;
+    uint32_t* dst = g_overlay.lockNoClear(w, h);
+    if (!dst) return;
+    for (int y = 0; y < ph; ++y) {
+        memcpy(dst + (size_t)(py + y) * w + px,
+               g_menuCache.px.data() + (size_t)y * pw,
+               (size_t)pw * sizeof(uint32_t));
+    }
 }
 
 // ---- 方案 B：在调用线程（游戏渲染线程）内直接绘制覆盖层 ----
-// 在 SwapBuffers 钩子中，用【游戏画面同一帧】投影好的屏幕坐标（g_boxes）
-// 同步绘制并呈现到覆盖层。由于绘制时机就在游戏 SwapBuffers 前后，覆盖层
-// 与游戏画面逐帧同时呈现 → 零延迟最强贴合（碰撞箱级），且全屏同样生效。
-// 注意：本函数运行在游戏渲染线程上，且需整屏清缓冲 + 抗锯齿线 +
-// UpdateLayeredWindow 呈现，开销高于方案 A 的独立线程绘制；这是“零延迟贴合”
-// 的固有代价，esp.ini 的 maxDistance/renderHz 等可用来控制上限。
+// ESP 仍逐帧重绘；菜单使用离屏缓存，静态时每帧只 memcpy 面板区域。
 static void esp_draw_overlay() {
     // 先取预投影数据（g_dataMutex 不嵌套在 g_overlayLock 内，避免锁序反转）
     std::vector<ScreenBox> boxes;
@@ -1026,52 +1292,56 @@ static void esp_draw_overlay() {
         boxes = g_boxes;
         trajs = g_trajectories;
     }
+
     std::lock_guard<std::mutex> lock(g_overlayLock);
-    // 卸载竞态防护：dll_unload 已置 g_running=false 时，宿主线程随后会 destroy()
-    // 覆盖层。若本线程此刻才拿到锁，说明卸载已开始，直接返回，绝不触碰可能已被
-    // 释放的 overlay（m_pixels/GDI 对象），避免释放后使用崩溃。
     if (!g_running) return;
+
+    bool espOn = g_espEnabled.load(std::memory_order_acquire);
+    bool menuOpen = g_menuVisible.load(std::memory_order_acquire);
+    if (!espOn && !menuOpen) return;
+
     int w = 0, h = 0;
-    uint32_t* pixels = g_overlay.lock(w, h);
-    if (!pixels || w <= 0 || h <= 0) return;
+    if (!g_overlay.lockNoClear(w, h) || w <= 0 || h <= 0) return;
+
+    bool renderMenu = menuOpen && menu_need_render(w, h);
+
+    // ESP 开启或菜单缓存需要重绘时才整屏清空；静态菜单直接复用上一帧缓冲。
+    if (espOn || renderMenu) {
+        g_overlay.lock(w, h);
+    }
 
     int lw = std::max(1, g_cfg.lineWidth - 1);
-    for (const auto& b : boxes) {
-        // 3D 盒边（已近平面裁剪，直接画）
-        for (int i = 0; i < b.segCount; ++i)
-            g_overlay.drawLine(b.segs[i].x0, b.segs[i].y0,
-                               b.segs[i].x1, b.segs[i].y1, b.color, lw);
-        // 半透明填充
-        if (b.hasFill) g_overlay.fillRect(b.minX, b.minY, b.maxX, b.maxY, b.color);
-        // 名字
-        if (!b.name.empty()) {
-            float tw = g_overlay.measureText(b.name, 14);
-            g_overlay.drawText(b.nameX - tw * 0.5f, b.nameY, b.name, b.color, 14);
-        }
-        // tracer（屏幕底部到实体）
-        if (b.hasTracer)
-            g_overlay.drawLine((float)(w / 2), (float)h, b.tx, b.ty, b.color, 1);
-    }
-
-    // 弹射物预测轨迹折线（先画，避免被盒子盖住）
-    for (const auto& t : trajs) {
-        for (int i = 0; i < t.segCount; ++i)
-            g_overlay.drawLine(t.segs[i].x0, t.segs[i].y0,
-                               t.segs[i].x1, t.segs[i].y1, t.color, lw);
-        // 弓预判落点/命中：3D 立方体（蓝=方块落点/障碍物，红=命中实体）
-        if (t.hasLanding) {
-            // 先渲染 6 个面为半透明平面（50%），再画 12 条边线，形成立体方块
-            for (int i = 0; i < t.cubeFacesCount; ++i) {
-                const auto& q = t.cubeFaces[i];
-                g_overlay.fillPoly(q.x, q.y, 4, t.landColor, 0.5f);
+    if (espOn) {
+        for (const auto& b : boxes) {
+            for (int i = 0; i < b.segCount; ++i)
+                g_overlay.drawLine(b.segs[i].x0, b.segs[i].y0,
+                                   b.segs[i].x1, b.segs[i].y1, b.color, lw);
+            if (b.hasFill) g_overlay.fillRect(b.minX, b.minY, b.maxX, b.maxY, b.color);
+            if (!b.name.empty()) {
+                float tw = g_overlay.measureText(b.name, 14);
+                g_overlay.drawText(b.nameX - tw * 0.5f, b.nameY, b.name, b.color, 14);
             }
-            for (int i = 0; i < t.cubeCount; ++i)
-                g_overlay.drawLine(t.cube[i].x0, t.cube[i].y0,
-                                   t.cube[i].x1, t.cube[i].y1, t.landColor, 1);
+            if (b.hasTracer)
+                g_overlay.drawLine((float)(w / 2), (float)h, b.tx, b.ty, b.color, 1);
+        }
+
+        for (const auto& t : trajs) {
+            for (int i = 0; i < t.segCount; ++i)
+                g_overlay.drawLine(t.segs[i].x0, t.segs[i].y0,
+                                   t.segs[i].x1, t.segs[i].y1, t.color, lw);
+            if (t.hasLanding) {
+                for (int i = 0; i < t.cubeFacesCount; ++i) {
+                    const auto& q = t.cubeFaces[i];
+                    g_overlay.fillPoly(q.x, q.y, 4, t.landColor, 0.5f);
+                }
+                for (int i = 0; i < t.cubeCount; ++i)
+                    g_overlay.drawLine(t.cube[i].x0, t.cube[i].y0,
+                                       t.cube[i].x1, t.cube[i].y1, t.landColor, 1);
+            }
         }
     }
 
-    if (g_cfg.nameTags && g_espEnabled.load(std::memory_order_acquire)) {
+    if (espOn && g_cfg.nameTags) {
         ClickerSnapshot cs = clicker_snapshot();
         wchar_t status[96];
         swprintf(status, 96, L"ESP ON   CLICKER %s   ATK:%s   PLACE:%s",
@@ -1082,9 +1352,8 @@ static void esp_draw_overlay() {
         g_overlay.drawText((float)w - sw - 10, (float)h - 22, status, g_cfg.colHud, 14);
     }
 
-    // Insert 连点器菜单最后绘制，盖在 ESP / HUD 之上
-    if (g_menuVisible.load(std::memory_order_acquire))
-        draw_menu(g_overlay, w, h);
+    if (renderMenu) render_menu_cache(w, h);
+    if (menuOpen) blit_menu_cache(w, h);
 
     g_overlay.present();
 }
@@ -1097,6 +1366,24 @@ void esp_on_swap() {
     if (!g_running) return;
     bool enabled = g_espEnabled.load(std::memory_order_acquire);
     bool menuOpen = g_menuVisible.load(std::memory_order_acquire);
+
+    // 空闲优化：ESP 关、菜单关、攻击/放置门控都关时，完全不碰 JVM，
+    // SwapBuffers 钩子只做一次原子判断就返回。
+    ClickerSnapshot idleSnap = clicker_snapshot();
+    bool needCombat = menuOpen || idleSnap.settings.attackGate || idleSnap.settings.placeGate;
+    if (!enabled && !needCombat) {
+        // 空闲预热：每 1s 尝试一次符号解析。这样第一次按 Insert 打开菜单时
+        // JNI 符号早已就绪，不会把解析开销压在开菜单那一帧上。
+        if (!jvm_ready()) {
+            static DWORD nextWarmup = 0;
+            DWORD nowT = GetTickCount();
+            if ((int)(nowT - nextWarmup) >= 0) {
+                nextWarmup = nowT + 1000;
+                jvm_hook_begin();
+            }
+        }
+        return;
+    }
 
     // 首次在此线程解析符号，之后每帧直接复用 JNIEnv
     if (!jvm_hook_begin()) return;
@@ -1176,12 +1463,31 @@ static void render_loop(HWND gameHwnd) {
 
     // 高精度定时（1ms 级 sleep），消除 15.6ms 系统时钟跳变导致的帧率抖动
     timeBeginPeriod(1);
+    // 渲染线程实际按 esp.ini 的 renderHz 运行（默认 120Hz = ~8ms），
+    // 菜单输入/鼠标/可见性响应不再被固定 16ms 限制。
+    int hostHz = g_cfg.renderHz;
+    if (hostHz < 30) hostHz = 30;
+    if (hostHz > 250) hostHz = 250;
+    const int hostPeriodMs = 1000 / hostHz;
+
+    // Win10 1803+ 高精度可等待定时器：Sleep(8) 仍可能被调度器按 15.6ms
+    // 节拍合并，导致菜单实际只有 ~60Hz；改用 CREATE_WAITABLE_TIMER_HIGH_RESOLUTION。
+    typedef HANDLE(WINAPI* CreateWaitableTimerExW_t)(LPSECURITY_ATTRIBUTES, LPCWSTR, DWORD, DWORD);
+    HANDLE hHostTimer = nullptr;
+    HMODULE hK32 = GetModuleHandleW(L"kernel32.dll");
+    auto pCreateWaitableTimerExW = hK32 ? (CreateWaitableTimerExW_t)GetProcAddress(hK32, "CreateWaitableTimerExW") : nullptr;
+    if (pCreateWaitableTimerExW)
+        hHostTimer = pCreateWaitableTimerExW(nullptr, nullptr, 0x00000002 /*HIGH_RESOLUTION*/, TIMER_ALL_ACCESS);
+    if (!hHostTimer)
+        hHostTimer = CreateWaitableTimerW(nullptr, FALSE, nullptr);
 
     // 界面打开防抖计数：连续 N 帧确认 guiOpen 才隐藏覆盖层，
     // 避免 mc.screen 瞬时非空（mod 弹窗等）导致整层 60Hz 闪烁。
     int guiOpenStreak = 0;
     // 覆盖层当前可见性（本线程内的局部缓存，只在状态翻转时操作窗口）
     bool overlayVisible = false;
+    // 菜单打开时覆盖层需要截获鼠标；关闭时恢复鼠标穿透
+    bool overlayClickable = false;
 
     while (g_running) {
         // 心跳：确认宿主线程持续存活（每 ~1s 一次），用于定位死亡点
@@ -1203,10 +1509,19 @@ static void render_loop(HWND gameHwnd) {
             DispatchMessageW(&msg);
         }
 
-        // Insert 呼出/关闭菜单 + 菜单内键盘操作
+        // Insert 呼出/关闭菜单 + 菜单内键盘/鼠标操作
         menu_handle_input(gameHwnd);
 
         bool menuOpen = g_menuVisible.load(std::memory_order_acquire);
+        clicker_set_menu_open(menuOpen);
+
+        // 菜单打开时覆盖层从鼠标穿透切换为可点击（仍不抢游戏焦点）
+        if (menuOpen != overlayClickable) {
+            std::lock_guard<std::mutex> lock(g_overlayLock);
+            g_overlay.set_clickable(menuOpen);
+            overlayClickable = menuOpen;
+            esp_log("[menu] 鼠标%s", menuOpen ? "捕获（菜单打开，连点已暂停）" : "穿透（菜单关闭）");
+        }
 
         // ============ 统一可见性状态管理 ============
         // ESP 或菜单任一开启就显示覆盖层；状态翻转才操作窗口。
@@ -1270,8 +1585,13 @@ static void render_loop(HWND gameHwnd) {
             }
         }
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(16));
+        // 相对周期唤醒；负 100ns 单位表示相对时间
+        LARGE_INTEGER due;
+        due.QuadPart = -(LONGLONG)hostPeriodMs * 10000LL;
+        SetWaitableTimer(hHostTimer, &due, 0, nullptr, nullptr, FALSE);
+        WaitForSingleObject(hHostTimer, INFINITE);
     }
+    if (hHostTimer) CloseHandle(hHostTimer);
     g_overlayVisible.store(false, std::memory_order_release);
     timeEndPeriod(1);
 }

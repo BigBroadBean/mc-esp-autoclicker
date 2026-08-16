@@ -127,6 +127,43 @@ uint32_t* Overlay::lock(int& w, int& h) {
     return m_pixels;
 }
 
+uint32_t* Overlay::lockNoClear(int& w, int& h) {
+    w = m_w; h = m_h;
+    return m_pixels;
+}
+
+// 菜单打开时移除 WS_EX_TRANSPARENT：覆盖层截获鼠标，游戏保持前台（NOACTIVATE）。
+// 菜单关闭时恢复穿透，鼠标输入完全还给游戏。
+void Overlay::set_clickable(bool on) {
+    if (!m_hwnd) return;
+    LONG_PTR ex = GetWindowLongPtrW(m_hwnd, GWL_EXSTYLE);
+    if (on) ex &= ~((LONG_PTR)WS_EX_TRANSPARENT);
+    else    ex |= (LONG_PTR)WS_EX_TRANSPARENT;
+    SetWindowLongPtrW(m_hwnd, GWL_EXSTYLE, ex);
+    SetWindowPos(m_hwnd, nullptr, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+}
+
+bool Overlay::begin_offscreen(int w, int h, uint32_t* pixels) {
+    if (!pixels || w <= 0 || h <= 0) return false;
+    m_offscreenSavedPixels = m_pixels;
+    m_offscreenSavedW = m_w;
+    m_offscreenSavedH = m_h;
+    m_pixels = pixels;
+    m_w = w;
+    m_h = h;
+    return true;
+}
+
+void Overlay::end_offscreen() {
+    m_pixels = m_offscreenSavedPixels;
+    m_w = m_offscreenSavedW;
+    m_h = m_offscreenSavedH;
+    m_offscreenSavedPixels = nullptr;
+    m_offscreenSavedW = 0;
+    m_offscreenSavedH = 0;
+}
+
 // 预乘 alpha 后处理（SSE2 版本）：GDI 只写 RGB（alpha=0），这里把
 // “alpha==0 但 RGB 非 0”的像素设为不透明；已有 alpha（半透明填充）保持不动。
 // 逐 4 像素批量处理，避免 2M+ 像素的逐字节循环成为性能瓶颈。
@@ -307,21 +344,45 @@ void Overlay::drawRect(float x1, float y1, float x2, float y2, uint32_t rgb, int
 
 // 半透明填充：直接写像素（预乘 alpha），alpha≈70
 void Overlay::fillRect(float x1, float y1, float x2, float y2, uint32_t rgb) {
-    if (!m_pixels) return;
+    fillRectAlpha(x1, y1, x2, y2, rgb, 70.0f / 255.0f);
+}
+
+void Overlay::fillRectAlpha(float x1, float y1, float x2, float y2, uint32_t rgb, float alpha) {
+    if (!m_pixels || alpha <= 0.0f) return;
+    if (alpha > 1.0f) alpha = 1.0f;
     int x0 = (int)x1, y0 = (int)y1, x1i = (int)x2, y1i = (int)y2;
     if (x0 > x1i) std::swap(x0, x1i);
     if (y0 > y1i) std::swap(y0, y1i);
     x0 = std::max(0, x0); y0 = std::max(0, y0);
     x1i = std::min(m_w, x1i); y1i = std::min(m_h, y1i);
-    const int a = 70;
-    uint32_t pr = (((rgb >> 16) & 255) * a) / 255;
-    uint32_t pg = (((rgb >> 8) & 255) * a) / 255;
-    uint32_t pb = (((rgb) & 255) * a) / 255;
-    uint32_t val = (uint32_t(a) << 24) | (pr << 16) | (pg << 8) | pb;
+    const int a = (int)(alpha * 255.0f + 0.5f);
+    uint32_t sr = (rgb >> 16) & 255, sg = (rgb >> 8) & 255, sb = rgb & 255;
+    if (a >= 255) {
+        uint32_t val = (255u << 24) | (sr << 16) | (sg << 8) | sb;
+        for (int yy = y0; yy < y1i; ++yy) {
+            uint32_t* row = m_pixels + (size_t)yy * m_w;
+            for (int xx = x0; xx < x1i; ++xx) row[xx] = val;
+        }
+        return;
+    }
+    uint32_t pr = (sr * a) / 255, pg = (sg * a) / 255, pb = (sb * a) / 255;
+    int inv = 255 - a;
     for (int yy = y0; yy < y1i; ++yy) {
         uint32_t* row = m_pixels + (size_t)yy * m_w;
-        for (int xx = x0; xx < x1i; ++xx) row[xx] = val;
+        for (int xx = x0; xx < x1i; ++xx) {
+            uint32_t d = row[xx];
+            uint32_t da = (d >> 24) & 255;
+            uint32_t dr = ((d >> 16) & 255) * inv / 255;
+            uint32_t dg = ((d >> 8) & 255) * inv / 255;
+            uint32_t db = (d & 255) * inv / 255;
+            uint32_t oa = a + da * inv / 255;
+            row[xx] = (oa << 24) | ((pr + dr) << 16) | ((pg + dg) << 8) | (pb + db);
+        }
     }
+}
+
+void Overlay::fillRectOpaque(float x1, float y1, float x2, float y2, uint32_t rgb) {
+    fillRectAlpha(x1, y1, x2, y2, rgb, 1.0f);
 }
 
 // 多边形扫描线填充（软件，source-over 预乘 alpha）。

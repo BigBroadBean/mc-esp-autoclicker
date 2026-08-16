@@ -31,6 +31,12 @@ public:
     // 返回像素缓冲（已清空为全透明），大小 w*h
     uint32_t* lock(int& w, int& h);
 
+    // 返回当前像素缓冲但不做清屏（静态菜单复用时避免整屏 memset）
+    uint32_t* lockNoClear(int& w, int& h);
+
+    // 菜单打开时把覆盖层从鼠标穿透切换为可点击（不激活、不抢游戏焦点）
+    void set_clickable(bool on);
+
     // 把缓冲呈现到窗口（会先做 alpha 后处理）
     void present();
 
@@ -40,11 +46,19 @@ public:
     void drawLine(float x1, float y1, float x2, float y2, uint32_t rgb, int width);
     void drawRect(float x1, float y1, float x2, float y2, uint32_t rgb, int width);
     void fillRect(float x1, float y1, float x2, float y2, uint32_t rgb);
+    void fillRectAlpha(float x1, float y1, float x2, float y2, uint32_t rgb, float alpha);
+    void fillRectOpaque(float x1, float y1, float x2, float y2, uint32_t rgb);
     // 填充凸/凹多边形（n 个顶点），50% 半透明（source-over 预乘 alpha）。
     // 用于 3D 落点方块 6 个面的平面渲染。
     void fillPoly(const float* xs, const float* ys, int n, uint32_t rgb, float alpha);
     void drawText(float x, float y, const std::wstring& text, uint32_t rgb, int px);
     float measureText(const std::wstring& text, int px);
+
+    // ---- 离屏渲染（菜单缓存用） ----
+    // 临时把绘制目标切到外部像素缓冲。结束前必须调用 end_offscreen。
+    // 注意：drawRect/GDI 仍指向主 DIB，离屏目标请使用 drawLine/fillRect*/drawText。
+    bool begin_offscreen(int w, int h, uint32_t* pixels);
+    void end_offscreen();
 
     bool visible = false;
 
@@ -62,6 +76,8 @@ private:
     HBITMAP  m_dib   = nullptr;
     uint32_t* m_pixels = nullptr;
     int      m_w = 0, m_h = 0;
+    uint32_t* m_offscreenSavedPixels = nullptr;
+    int      m_offscreenSavedW = 0, m_offscreenSavedH = 0;
     int      m_lastX = 0, m_lastY = 0;   // 覆盖层窗口上次的屏幕位置（顶层窗口用屏幕坐标）
     HGDIOBJ  m_oldBmp = nullptr;
     HFONT    m_font  = nullptr;

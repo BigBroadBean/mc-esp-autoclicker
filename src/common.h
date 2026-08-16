@@ -39,8 +39,8 @@ void esp_log_w(const wchar_t* fmt, ...);
 struct ClickerSettings {
     bool    enabled          = false;       // 注入后初始是否启用连点
     int     toggleKey        = VK_MBUTTON;  // 启停连点热键（参考实现默认鼠标中键）
-    bool    leftEnabled      = false;       // 左键连点
-    bool    rightEnabled     = false;       // 右键连点
+    bool    leftEnabled      = true;        // 左键连点（默认启用，等待连点总开关）
+    bool    rightEnabled     = true;        // 右键连点（默认启用，等待连点总开关）
     bool    keep             = false;       // 保持模式：无需按住鼠标即可连点
     int     cpsLeft10        = 100;         // 左键 CPS * 10（100 = 10.0 CPS）
     int     cpsRight10       = 100;         // 右键 CPS * 10
@@ -62,7 +62,7 @@ struct ClickerSettings {
 // 配置（esp.ini，UTF-8 / ANSI 均可）
 // ------------------------------------------------------------
 struct EspConfig {
-    bool    enabled          = true;
+    bool    enabled          = false;       // ESP 默认关闭，按 Insert 在菜单中开启
     int     menuKey          = VK_INSERT;   // Insert：呼出/关闭连点器菜单（原 ESP 开关改入菜单）
     double  maxDistance      = 200.0;
     double  fov              = 70.0;        // 游戏内 FOV（垂直，默认 70）

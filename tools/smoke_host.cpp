@@ -27,6 +27,15 @@ int main() {
     printf("LoadLibrary=%p err=%lu\n", mod, GetLastError());
     if (!mod) return 3;
 
+    // 等待 ESP 渲染线程进入宿主循环，再打开菜单验证鼠标捕获切换
+    Sleep(300);
+    keybd_event(VK_INSERT, 0, 0, 0);
+    keybd_event(VK_INSERT, 0, KEYEVENTF_KEYUP, 0);
+    Sleep(400);
+    keybd_event(VK_INSERT, 0, 0, 0);
+    keybd_event(VK_INSERT, 0, KEYEVENTF_KEYUP, 0);
+    Sleep(200);
+
     for (int i = 0; i < 50; ++i) {
         MSG m;
         while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) {
