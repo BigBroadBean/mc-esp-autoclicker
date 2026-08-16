@@ -31,6 +31,7 @@ static std::atomic<bool> g_espEnabled{true};
 // ---- Insert 菜单（渲染线程写，游戏线程画）----
 static std::atomic<bool> g_menuVisible{false};
 static std::atomic<int>  g_menuCursor{0};
+static std::atomic<int>  g_activeProfileAtomic{0};   // 供游戏线程无锁读取
 static std::atomic<bool> g_menuCaptureKey{false};
 static std::atomic<int>  g_menuCaptureTarget{0};
 // 强制停止标记：dll_unload 置位，用于在“等待游戏窗口”等尚未进入主循环的阶段
@@ -836,6 +837,7 @@ static void menu_adjust(int item, int dir, bool fast) {
         if (next >= EspConfig::kClickerProfiles) next = 0;
         g_cfg.activeProfile = next;
         g_cfg.clicker = g_cfg.profiles[next];
+        g_activeProfileAtomic.store(next, std::memory_order_release);
         break;
     }
     case MI_LEFT: cl.leftEnabled = !cl.leftEnabled; break;
@@ -981,7 +983,13 @@ static void menu_mouse_move(int x, int y, bool leftDown) {
             float t = (float)((x - px) - x0) / (float)(x1 - x0);
             menu_slider_apply(item, t, g_cfg.clicker);
             clicker_apply_settings(g_cfg.clicker);
-            g_menuDirty.store(true, std::memory_order_release);
+            // 拖动节流：缓存重绘约 60Hz，避免每个 WM_MOUSEMOVE 都整面板重画
+            static DWORD lastSliderRender = 0;
+            DWORD nowT = GetTickCount();
+            if ((int)(nowT - lastSliderRender) >= 16) {
+                lastSliderRender = nowT;
+                g_menuDirty.store(true, std::memory_order_release);
+            }
         }
         return;
     }
@@ -1010,33 +1018,96 @@ static void menu_mouse_wheel(short delta) {
     menu_move(delta > 0 ? -1 : 1);
 }
 
+// WndProc 只入队，绝不在窗口消息回调里抢锁 / 重绘。
+// 渲染线程每次宿主循环最多处理 4 个队列事件，避免 WM_MOUSEMOVE 洪水把游戏线程饿死。
+struct MenuMouseEvent {
+    UINT type = 0;      // WM_MOUSEMOVE / WM_LBUTTONDOWN / WM_LBUTTONUP / WM_MOUSEWHEEL / WM_MOUSELEAVE / WM_CAPTURECHANGED
+    int  x = 0, y = 0;
+    int  delta = 0;     // 滚轮 delta 或左键是否按下
+};
+static MenuMouseEvent g_mouseQueue[64];
+static int g_mouseHead = 0;
+static int g_mouseTail = 0;
+
+static void menu_mouse_push(const MenuMouseEvent& ev) {
+    int next = (g_mouseTail + 1) % 64;
+    if (next == g_mouseHead) {
+        // 队列满：把最后一个 WM_MOUSEMOVE 覆盖为最新位置（拖动只关心最新值）
+        int last = (g_mouseTail - 1 + 64) % 64;
+        if (last != g_mouseHead && g_mouseQueue[last].type == WM_MOUSEMOVE)
+            g_mouseQueue[last] = ev;
+        return;
+    }
+    g_mouseQueue[g_mouseTail] = ev;
+    g_mouseTail = next;
+}
+
+static void menu_clear_mouse_queue() {
+    g_mouseHead = 0;
+    g_mouseTail = 0;
+}
+
+static void menu_process_mouse_events() {
+    for (int n = 0; n < 4 && g_mouseHead != g_mouseTail; ++n) {
+        MenuMouseEvent ev = g_mouseQueue[g_mouseHead];
+        g_mouseHead = (g_mouseHead + 1) % 64;
+        switch (ev.type) {
+        case WM_MOUSEMOVE:
+            menu_mouse_move(ev.x, ev.y, ev.delta != 0);
+            break;
+        case WM_LBUTTONDOWN:
+            menu_mouse_down(ev.x, ev.y);
+            break;
+        case WM_LBUTTONUP:
+            menu_mouse_up(ev.x, ev.y);
+            break;
+        case WM_MOUSEWHEEL:
+            menu_mouse_wheel((short)ev.delta);
+            break;
+        case WM_MOUSELEAVE:
+            g_menuHover.store(-1, std::memory_order_release);
+            g_menuHoverStartMs.store(0, std::memory_order_release);
+            g_menuDirty.store(true, std::memory_order_release);
+            break;
+        case WM_CAPTURECHANGED:
+            if (!ev.delta) {
+                g_menuDrag.store(-1, std::memory_order_release);
+                g_menuDirty.store(true, std::memory_order_release);
+            }
+            break;
+        default: break;
+        }
+    }
+}
+
 static bool menu_input_proc(UINT msg, WPARAM wParam, LPARAM lParam, void*) {
     if (!g_menuVisible.load(std::memory_order_acquire)) return false;
-    std::lock_guard<std::mutex> lock(g_clickerCfgMutex);
+    MenuMouseEvent ev;
+    ev.type = msg;
+    ev.x = GET_X_LPARAM(lParam);
+    ev.y = GET_Y_LPARAM(lParam);
+    ev.delta = 0;
     switch (msg) {
     case WM_MOUSEMOVE:
-        menu_mouse_move(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam),
-                        (wParam & MK_LBUTTON) != 0);
+        ev.delta = (wParam & MK_LBUTTON) ? 1 : 0;
+        menu_mouse_push(ev);
         return true;
     case WM_LBUTTONDOWN:
-        menu_mouse_down(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+        menu_mouse_push(ev);
         return true;
     case WM_LBUTTONUP:
-        menu_mouse_up(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+        menu_mouse_push(ev);
         return true;
     case WM_MOUSEWHEEL:
-        menu_mouse_wheel(GET_WHEEL_DELTA_WPARAM(wParam));
+        ev.delta = GET_WHEEL_DELTA_WPARAM(wParam);
+        menu_mouse_push(ev);
         return true;
     case WM_MOUSELEAVE:
-        g_menuHover.store(-1, std::memory_order_release);
-        g_menuHoverStartMs.store(0, std::memory_order_release);
-        g_menuDirty.store(true, std::memory_order_release);
+        menu_mouse_push(ev);
         return true;
     case WM_CAPTURECHANGED:
-        if (!lParam) {   // 捕获被系统取消
-            g_menuDrag.store(-1, std::memory_order_release);
-            g_menuDirty.store(true, std::memory_order_release);
-        }
+        ev.delta = lParam ? 1 : 0;
+        menu_mouse_push(ev);
         return true;
     default:
         return false;
@@ -1068,6 +1139,8 @@ static void menu_handle_input(HWND gameHwnd) {
     static DWORD nextRepeat = 0;
     static int  repeatDir = 0;
 
+    // 每帧最多处理 4 个真实鼠标事件：既保持跟手，又不会阻塞游戏渲染线程
+    menu_process_mouse_events();
     menu_tooltip_tick();
 
     // ---- 热键捕获模式 ----
@@ -1098,6 +1171,7 @@ static void menu_handle_input(HWND gameHwnd) {
         bool next = !g_menuVisible.load(std::memory_order_acquire);
         g_menuVisible.store(next, std::memory_order_release);
         g_menuDirty.store(true, std::memory_order_release);
+        menu_clear_mouse_queue();
         if (next) {
             g_menuCursor.store(0, std::memory_order_release);
             g_menuHover.store(-1, std::memory_order_release);
@@ -1165,11 +1239,7 @@ static void draw_menu_panel(Overlay& ov, int panelW, int panelH) {
     ClickerSnapshot cs = clicker_snapshot();
     const ClickerSettings& cl = cs.settings;
 
-    int activeProfile = 0;
-    {
-        std::lock_guard<std::mutex> lock(g_clickerCfgMutex);
-        activeProfile = g_cfg.activeProfile;
-    }
+    int activeProfile = g_activeProfileAtomic.load(std::memory_order_acquire);
 
     const uint32_t colBg = 0x10131C;
     const uint32_t colBorder = 0x35618F;
@@ -1672,6 +1742,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI esp_thread_main(LPVOID) {
     // 无需再靠延迟启动避扫描窗口。
     config_load(g_cfg);
     g_espEnabled = g_cfg.enabled;
+    g_activeProfileAtomic.store(g_cfg.activeProfile, std::memory_order_release);
     clicker_apply_settings(g_cfg.clicker);
     clicker_set_settings_changed_callback(on_clicker_hotkey_changed);
     clicker_set_running(g_cfg.clicker.enabled);
