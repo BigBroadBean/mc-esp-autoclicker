@@ -1585,11 +1585,15 @@ static void render_loop(HWND gameHwnd) {
             }
         }
 
-        // 相对周期唤醒；负 100ns 单位表示相对时间
-        LARGE_INTEGER due;
-        due.QuadPart = -(LONGLONG)hostPeriodMs * 10000LL;
-        SetWaitableTimer(hHostTimer, &due, 0, nullptr, nullptr, FALSE);
-        WaitForSingleObject(hHostTimer, INFINITE);
+        if (hHostTimer) {
+            // 相对周期唤醒；负 100ns 单位表示相对时间
+            LARGE_INTEGER due;
+            due.QuadPart = -(LONGLONG)hostPeriodMs * 10000LL;
+            SetWaitableTimer(hHostTimer, &due, 0, nullptr, nullptr, FALSE);
+            WaitForSingleObject(hHostTimer, INFINITE);
+        } else {
+            Sleep((DWORD)hostPeriodMs);   // 兜底：定时器创建失败时避免忙循环
+        }
     }
     if (hHostTimer) CloseHandle(hHostTimer);
     g_overlayVisible.store(false, std::memory_order_release);
