@@ -24,12 +24,34 @@ static void apply_capture_exclusion(HWND hwnd) {
     esp_log("[overlay] SetWindowDisplayAffinity 失败 %lu", GetLastError());
 }
 
+// 真正的窗口消息处理：菜单打开（非 WS_EX_TRANSPARENT）时鼠标消息到达这里。
+// WM_MOUSEACTIVATE 始终返回 MA_NOACTIVATE，保证游戏窗口仍是前台窗口。
+LRESULT CALLBACK Overlay::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    Overlay* self = (Overlay*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    if (msg == WM_MOUSEACTIVATE) return MA_NOACTIVATE;
+
+    // 跟踪鼠标离开，供悬浮提示清除
+    if (msg == WM_MOUSEMOVE && self) {
+        TRACKMOUSEEVENT tme = {};
+        tme.cbSize = sizeof(tme);
+        tme.dwFlags = TME_LEAVE;
+        tme.hwndTrack = hwnd;
+        TrackMouseEvent(&tme);
+    }
+
+    if (self && self->m_inputFn &&
+        self->m_inputFn(msg, wParam, lParam, self->m_inputUser)) {
+        return 0;   // 菜单已消费
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
 bool Overlay::create(HWND gameHwnd) {
     if (m_hwnd) return true;
     if (!gameHwnd || !IsWindow(gameHwnd)) return false;
 
     WNDCLASSW wc{};
-    wc.lpfnWndProc = DefWindowProcW;
+    wc.lpfnWndProc = Overlay::WndProc;
     wc.hInstance = GetModuleHandleW(nullptr);
     wc.lpszClassName = kCls;
     if (!RegisterClassW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
@@ -46,6 +68,7 @@ bool Overlay::create(HWND gameHwnd) {
         WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
         kCls, L"", WS_POPUP, 0, 0, 8, 8, gameHwnd, nullptr, wc.hInstance, nullptr);
     if (!m_hwnd) { esp_log("[overlay] CreateWindowExW 失败 %lu", GetLastError()); return false; }
+    SetWindowLongPtrW(m_hwnd, GWLP_USERDATA, (LONG_PTR)this);
 
     apply_capture_exclusion(m_hwnd);
 

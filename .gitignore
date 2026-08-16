@@ -17,6 +17,7 @@ esp_shm.txt
 
 # ---- 冒烟测试可执行文件 ----
 tools/smoke_host.exe
+tools/smoke_mouse.exe
 
 # ---- 系统文件 ----
 Thumbs.db

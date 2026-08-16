@@ -68,14 +68,27 @@ canPlace  = player.getMainHandItem().getItem() instanceof BlockItem
 | 输入 | 功能 |
 | --- | --- |
 | `Insert` | 呼出 / 关闭菜单 |
-| 鼠标左键 | 点选行 / 点击布尔项 / 拖拽滑块；点面板外关闭菜单 |
-| `↑` / `↓` | 选择项目 |
+| 鼠标左键 | 点击标签页 / 行 / 布尔项；拖拽滑块；点面板外关闭菜单 |
+| 鼠标滚轮 | 当前页内上 / 下选择项目 |
+| 鼠标悬停 | 0.35 秒后显示当前功能的悬浮说明 |
+| `Tab` | 循环切换功能页 |
+| `↑` / `↓` | 当前页内选择项目 |
 | `←` / `→` | 调整数值 / 循环选项 / 切换布尔项 |
 | `Shift + ←/→` | 数值快速调整（CPS、CPS 上限、停止秒数） |
 | `Enter` | 切换布尔项；在热键项目上按 Enter 后按任意键绑定 |
 | `Esc` | 关闭菜单 / 取消热键绑定 |
 
 菜单打开期间覆盖层会临时截获鼠标，同时自动暂停连点，关闭菜单后恢复鼠标穿透。
+
+鼠标消息由 Overlay 的真实 `WndProc` 接收（`WM_LBUTTONDOWN/UP`、`WM_MOUSEMOVE`、
+`WM_MOUSEWHEEL`、`WM_MOUSELEAVE`），不再使用 `GetAsyncKeyState` 模拟鼠标。
+
+菜单按功能分页，子功能归入父功能页：
+
+- **连点**：连点器总开关、左/右键开关、左/右键 CPS 与预设、保持模式、连点热键
+- **门控**：攻击门控及其热键、放置门控及其热键、光标门控
+- **高级**：随机 CPS、随机范围、拟人化节奏与强度、CPS 上限、定时停止
+- **系统**：ESP 开关、配置方案
 
 带滑块的菜单项：左/右键 CPS、随机范围、拟人化强度、CPS 上限、停止秒数。
 
@@ -148,7 +161,8 @@ DLL 不链接 `jvm.dll`，运行时通过 `JNI_GetCreatedJavaVMs` 动态定位 J
 │   ├── injector.exe         注入器（构建产物）
 │   └── mc_esp.dll           随注入器分发的 DLL（构建产物）
 └── tools/
-    └── smoke_host.cpp       无 JVM 冒烟测试宿主（GLFW30 假窗口 + LoadLibrary）
+    ├── smoke_host.cpp       无 JVM 冒烟测试宿主（GLFW30 假窗口 + LoadLibrary）
+    └── smoke_mouse.cpp      真实鼠标消息冒烟测试（WM_LBUTTONDOWN/UP/MOVE/WHEEL）
 ```
 
 ---
