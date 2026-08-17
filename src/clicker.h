@@ -46,6 +46,9 @@ void clicker_toggle_running();
 // 连点线程热键修改设置后回调（用于写回 esp.ini）。回调在锁外执行。
 void clicker_set_settings_changed_callback(void (*fn)());
 
+// 热键开关后的右下角悬浮提示回调。kind: 0=连点器 1=攻击门控 2=放置门控。
+void clicker_set_hotkey_toast_callback(void (*fn)(int kind, bool on));
+
 // 游戏渲染线程每帧调用：写入 JNI 战斗状态（无外部消息传递）。
 void clicker_set_combat(bool ready, bool canAttack, bool canPlace);
 

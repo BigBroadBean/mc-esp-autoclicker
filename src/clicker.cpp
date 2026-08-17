@@ -39,12 +39,18 @@ using namespace std::chrono;
 
 // 热键修改设置后的持久化回调（在 g_mutex 外执行）
 static void (*g_settingsChangedCb)() = nullptr;
+// 热键开关后的悬浮提示回调（kind, on）
+static void (*g_hotkeyToastCb)(int kind, bool on) = nullptr;
 
 // ------------------------------------------------------------
 // 对外接口
 // ------------------------------------------------------------
 void clicker_set_settings_changed_callback(void (*fn)()) {
     g_settingsChangedCb = fn;
+}
+
+void clicker_set_hotkey_toast_callback(void (*fn)(int kind, bool on)) {
+    g_hotkeyToastCb = fn;
 }
 
 void clicker_apply_settings(const ClickerSettings& s) {
@@ -275,9 +281,15 @@ static DWORD WINAPI clicker_thread_main(LPVOID) {
                 cfg = g_settings;
             }
 
-            // ---- 连点总开关热键（沿自 AutoClicker：按下沿触发，松开后可再次触发）----
+            // ---- 连点总开关热键（按下沿触发；运行状态写回 esp.ini 并弹提示）----
             bool curToggle = key_down(cfg.toggleKey);
-            if (curToggle && !prevToggle) clicker_toggle_running();
+            if (curToggle && !prevToggle) {
+                clicker_toggle_running();
+                if (g_hotkeyToastCb)
+                    g_hotkeyToastCb(0, g_running.load(std::memory_order_acquire));
+                if (g_settingsChangedCb)
+                    g_settingsChangedCb();
+            }
             prevToggle = curToggle;
 
             // ---- 攻击/放置门控热键（修改后写回配置）----
@@ -286,6 +298,7 @@ static DWORD WINAPI clicker_thread_main(LPVOID) {
                 cfg.attackGate = !cfg.attackGate;
                 clicker_apply_settings(cfg);
                 if (g_settingsChangedCb) g_settingsChangedCb();
+                if (g_hotkeyToastCb) g_hotkeyToastCb(1, cfg.attackGate);
             }
             prevAttack = curAttack;
 
@@ -294,6 +307,7 @@ static DWORD WINAPI clicker_thread_main(LPVOID) {
                 cfg.placeGate = !cfg.placeGate;
                 clicker_apply_settings(cfg);
                 if (g_settingsChangedCb) g_settingsChangedCb();
+                if (g_hotkeyToastCb) g_hotkeyToastCb(2, cfg.placeGate);
             }
             prevPlace = curPlace;
 
@@ -306,6 +320,8 @@ static DWORD WINAPI clicker_thread_main(LPVOID) {
                 } else if (now - stopStart >= seconds(cfg.autoStopSeconds)) {
                     g_running.store(false, std::memory_order_release);
                     stopArmed = false;
+                    if (g_hotkeyToastCb) g_hotkeyToastCb(0, false);
+                    if (g_settingsChangedCb) g_settingsChangedCb();
                 }
             } else if (!running) {
                 stopArmed = false;

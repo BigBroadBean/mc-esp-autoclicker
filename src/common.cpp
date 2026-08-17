@@ -170,6 +170,7 @@ void config_load(EspConfig& cfg) {
             if (section == "esp") {
                 if (key == "enabled") set(cfg.enabled);
                 else if (key == "menuKey" || key == "toggleKey") seti(cfg.menuKey);
+                else if (key == "espKey") seti(cfg.espKey);
                 else if (key == "maxDistance") setd(cfg.maxDistance);
                 else if (key == "fov") setd(cfg.fov);
                 else if (key == "box3d") set(cfg.box3d);
@@ -259,6 +260,7 @@ void config_save(const EspConfig& cfg) {
     line("[esp]");
     line((std::string("enabled = ") + b2s(cfg.enabled)).c_str());
     line((std::string("menuKey = ") + std::to_string(cfg.menuKey) + "          ; VK_INSERT = 45").c_str());
+    line((std::string("espKey = ") + std::to_string(cfg.espKey) + "            ; VK_HOME = 36，直接开关 ESP").c_str());
     line((std::string("maxDistance = ") + std::to_string(cfg.maxDistance)).c_str());
     line((std::string("fov = ") + std::to_string(cfg.fov) + "                     ; 与游戏内 FOV 一致（默认 70）").c_str());
     line((std::string("box3d = ") + b2s(cfg.box3d)).c_str());

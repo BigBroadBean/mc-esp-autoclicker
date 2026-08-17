@@ -63,7 +63,8 @@ struct ClickerSettings {
 // ------------------------------------------------------------
 struct EspConfig {
     bool    enabled          = false;       // ESP 默认关闭，按 Insert 在菜单中开启
-    int     menuKey          = VK_INSERT;   // Insert：呼出/关闭连点器菜单（原 ESP 开关改入菜单）
+    int     menuKey          = VK_INSERT;   // Insert：呼出/关闭连点器菜单
+    int     espKey           = VK_HOME;     // 快捷键直接开关 ESP（默认 HOME）
     double  maxDistance      = 200.0;
     double  fov              = 70.0;        // 游戏内 FOV（垂直，默认 70）
     bool    box3d            = true;        // 3D 立体包围盒（穿墙）

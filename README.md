@@ -101,11 +101,19 @@ canPlace  = player.getMainHandItem().getItem() instanceof BlockItem
 | 功能 | 默认按键 |
 | --- | --- |
 | 菜单 | `Insert` |
+| ESP 开关 | `Home` |
 | 连点器启停 | 鼠标中键（`VK_MBUTTON`） |
 | 攻击门控 | `F6` |
 | 放置门控 | `F7` |
 
+通过快捷键开关 ESP / 连点器 / 攻击门控 / 放置门控时，右下角会显示悬浮提示
+（Toast），持续约 2.2 秒。
+
 菜单中的修改会立即写入 DLL 同目录的 `esp.ini`。
+
+**本地保存**：所有设置均保存在 DLL 同目录的 `esp.ini`（UTF-8）。菜单修改、
+滑块拖动结束、快捷键开关 ESP / 连点器 / 门控都会立即写回；4 套配置方案分别
+保存在 `[clickerProfile1]`..`[clickerProfile4]`。
 
 ### 性能优化
 
@@ -171,7 +179,7 @@ DLL 不链接 `jvm.dll`，运行时通过 `JNI_GetCreatedJavaVMs` 动态定位 J
 
 DLL 启动时读取自身同目录 `esp.ini`；不存在时自动生成默认配置。
 
-- `[esp]`：ESP 渲染参数，`menuKey` 为菜单呼出键；`renderHz` 使用高精度可等待定时器驱动宿主循环。
+- `[esp]`：ESP 渲染参数，`menuKey` 为菜单呼出键，`espKey` 为 ESP 开关快捷键；`renderHz` 使用高精度可等待定时器驱动宿主循环。
 - 默认：**ESP 关闭**、**左右键连点开启**、**连点器总开关关闭**。
 - `[clicker]`：当前激活方案与热键，`activeProfile` 为当前方案（0..3）。
 - `[clickerProfile1]`..`[clickerProfile4]`：4 套连点器方案槽。

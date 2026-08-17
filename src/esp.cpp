@@ -32,6 +32,27 @@ static std::atomic<bool> g_espEnabled{true};
 static std::atomic<bool> g_menuVisible{false};
 static std::atomic<int>  g_menuCursor{0};
 static std::atomic<int>  g_activeProfileAtomic{0};   // 供游戏线程无锁读取
+static std::atomic<int>  g_espKeyAtomic{0};           // 供游戏线程无锁读取
+
+// ---- 右下角悬浮提示（单条，最新覆盖）----
+static std::mutex        g_toastMutex;
+static std::wstring      g_toastText;
+static uint32_t          g_toastColor = 0x66A3FF;
+static std::atomic<DWORD> g_toastStartMs{0};
+static constexpr DWORD   kToastDurationMs = 2200;
+
+static void show_toast(const wchar_t* text, uint32_t rgb) {
+    if (!text || !*text) return;
+    std::lock_guard<std::mutex> lock(g_toastMutex);
+    g_toastText = text;
+    g_toastColor = rgb;
+    g_toastStartMs.store(GetTickCount(), std::memory_order_release);
+}
+
+static bool toast_active() {
+    DWORD start = g_toastStartMs.load(std::memory_order_acquire);
+    return start != 0 && (int)(GetTickCount() - start) < (int)kToastDurationMs;
+}
 static std::atomic<bool> g_menuCaptureKey{false};
 static std::atomic<int>  g_menuCaptureTarget{0};
 // 强制停止标记：dll_unload 置位，用于在“等待游戏窗口”等尚未进入主循环的阶段
@@ -633,7 +654,7 @@ enum MenuItem {
     MI_HUMAN_MODE, MI_HUMAN_LEVEL,
     MI_CPS_MAX,
     MI_AUTOSTOP, MI_AUTOSTOP_SEC,
-    MI_ESP, MI_PROFILE,
+    MI_ESP, MI_ESP_KEY, MI_PROFILE,
     MI_COUNT
 };
 
@@ -651,11 +672,11 @@ static const int kPageAdvItems[kMenuMaxRows] = {
     MI_RANDOM, MI_RANDOM_RANGE, MI_HUMAN_MODE, MI_HUMAN_LEVEL,
     MI_CPS_MAX, MI_AUTOSTOP, MI_AUTOSTOP_SEC, -1, -1
 };
-static const int kPageSysItems[kMenuMaxRows] = { MI_ESP, MI_PROFILE, -1, -1, -1, -1, -1, -1, -1 };
+static const int kPageSysItems[kMenuMaxRows] = { MI_ESP, MI_ESP_KEY, MI_PROFILE, -1, -1, -1, -1, -1, -1 };
 static const int* kPageItems[PAGE_COUNT] = {
     kPageClickItems, kPageGateItems, kPageAdvItems, kPageSysItems
 };
-static const int kPageRowCount[PAGE_COUNT] = { 9, 5, 7, 2 };
+static const int kPageRowCount[PAGE_COUNT] = { 9, 5, 7, 3 };
 
 struct MenuItemDef { const wchar_t* label; const wchar_t* tip; };
 static const MenuItemDef kMenuItemDefs[MI_COUNT] = {
@@ -681,6 +702,7 @@ static const MenuItemDef kMenuItemDefs[MI_COUNT] = {
     { L"定时停止",     L"连点器开启 N 秒后自动停止。" },
     { L"停止秒数",     L"定时自动停止的秒数，1..3600。" },
     { L"ESP",          L"开关 ESP 绘制：盒子 / 名字 / 轨迹等。默认关闭。" },
+    { L"ESP 快捷键",   L"直接开关 ESP 的热键，按 Enter 后按任意键绑定。" },
     { L"配置方案",     L"切换整套连点参数方案，4 套方案独立保存。" },
 };
 
@@ -793,11 +815,22 @@ static void commit_clicker_config() {
     g_menuDirty.store(true, std::memory_order_release);
 }
 
+// 连点线程热键开关后的右下角悬浮提示
+static void on_clicker_hotkey_toast(int kind, bool on) {
+    switch (kind) {
+    case 0: show_toast(on ? L"连点器已开启" : L"连点器已停止", 0x52D88C); break;
+    case 1: show_toast(on ? L"仅可攻击时左键：开" : L"仅可攻击时左键：关", 0x66A3FF); break;
+    case 2: show_toast(on ? L"仅持方块时右键：开" : L"仅持方块时右键：关", 0x66A3FF); break;
+    default: break;
+    }
+}
+
 static void on_clicker_hotkey_changed() {
     std::lock_guard<std::mutex> lock(g_clickerCfgMutex);
     ClickerSnapshot cs = clicker_snapshot();
     g_cfg.clicker = cs.settings;
-    g_cfg.profiles[g_cfg.activeProfile] = cs.settings;
+    g_cfg.clicker.enabled = cs.running;   // 热键/自动停止后的连点开关也本地保存
+    g_cfg.profiles[g_cfg.activeProfile] = g_cfg.clicker;
     config_save(g_cfg);
     g_menuDirty.store(true, std::memory_order_release);
 }
@@ -892,6 +925,7 @@ static void menu_capture_commit(int vk) {
     case MI_HOTKEY: g_cfg.clicker.toggleKey = vk; break;
     case MI_ATTACK_KEY: g_cfg.clicker.attackGateKey = vk; break;
     case MI_PLACE_KEY: g_cfg.clicker.placeGateKey = vk; break;
+    case MI_ESP_KEY: g_cfg.espKey = vk; g_espKeyAtomic.store(vk, std::memory_order_release); break;
     default: break;
     }
     g_menuCaptureKey.store(false, std::memory_order_release);
@@ -905,7 +939,7 @@ static bool key_down_any(int vk) {
 
 static void menu_activate_item(int item) {
     switch (item) {
-    case MI_HOTKEY: case MI_ATTACK_KEY: case MI_PLACE_KEY:
+    case MI_HOTKEY: case MI_ATTACK_KEY: case MI_PLACE_KEY: case MI_ESP_KEY:
         g_menuCaptureTarget.store(item, std::memory_order_release);
         g_menuCaptureKey.store(true, std::memory_order_release);
         g_menuDirty.store(true, std::memory_order_release);
@@ -1135,7 +1169,7 @@ static void menu_handle_input(HWND gameHwnd) {
 
     static bool prevInsert = false, prevUp = false, prevDown = false,
                 prevLeft = false, prevRight = false, prevEnter = false,
-                prevEsc = false, prevTab = false;
+                prevEsc = false, prevTab = false, prevEspKey = false;
     static DWORD nextRepeat = 0;
     static int  repeatDir = 0;
 
@@ -1165,6 +1199,18 @@ static void menu_handle_input(HWND gameHwnd) {
         }
         return;
     }
+
+    // ---- ESP 快捷键：无论菜单是否打开都可直接开关，并写回 esp.ini ----
+    bool espKeyDown = key_down_any(g_cfg.espKey);
+    if (espKeyDown && !prevEspKey && g_cfg.espKey != 0) {
+        bool next = !g_espEnabled.load(std::memory_order_acquire);
+        g_espEnabled.store(next, std::memory_order_release);
+        g_cfg.enabled = next;
+        config_save(g_cfg);
+        show_toast(next ? L"ESP 已开启" : L"ESP 已关闭", next ? 0x52D88C : 0x9AA7B8);
+        g_menuDirty.store(true, std::memory_order_release);
+    }
+    prevEspKey = espKeyDown;
 
     bool insert = key_down_any(g_cfg.menuKey);
     if (insert && !prevInsert) {
@@ -1297,6 +1343,7 @@ static void draw_menu_panel(Overlay& ov, int panelW, int panelH) {
         switch (item) {
         case MI_CLICKER: value = cs.running ? on : off; color = cs.running ? colOn : colOff; break;
         case MI_ESP: value = g_espEnabled.load() ? on : off; color = g_espEnabled.load() ? colOn : colOff; break;
+        case MI_ESP_KEY: value = clicker_key_name(g_espKeyAtomic.load(std::memory_order_acquire)); color = colAcc; break;
         case MI_PROFILE: swprintf(buf, 128, L"方案 %d", activeProfile + 1); value = buf; color = colAcc; break;
         case MI_LEFT: value = cl.leftEnabled ? on : off; color = cl.leftEnabled ? colOn : colOff; break;
         case MI_LEFT_CPS: swprintf(buf, 128, L"%.1f", cl.cpsLeft10 / 10.0); value = buf; color = colAcc; break;
@@ -1414,6 +1461,38 @@ static void blit_menu_cache(int w, int h) {
     }
 }
 
+// ============================================================
+// 右下角悬浮提示（快捷键开关功能时显示）
+// ============================================================
+static void draw_toast(Overlay& ov, int w, int h) {
+    std::wstring text;
+    uint32_t color = 0x66A3FF;
+    {
+        std::lock_guard<std::mutex> lock(g_toastMutex);
+        if (!toast_active()) return;
+        text = g_toastText;
+        color = g_toastColor;
+    }
+    if (text.empty()) return;
+
+    const uint32_t colBg = 0x0D1118;
+    const uint32_t colBorder = color;
+    float tw = ov.measureText(text, 14);
+    float bw = tw + 28.0f;
+    float bh = 30.0f;
+    float x = (float)w - bw - 14.0f;
+    float y = (float)h - bh - 14.0f;
+    if (x < 8.0f) x = 8.0f;
+    if (y < 8.0f) y = 8.0f;
+
+    ov.fillRectAlpha(x, y, x + bw, y + bh, colBg, 0.90f);
+    ov.drawLine(x, y, x + bw, y, colBorder, 1);
+    ov.drawLine(x, y + bh, x + bw, y + bh, colBorder, 1);
+    ov.drawLine(x, y, x, y + bh, colBorder, 1);
+    ov.drawLine(x + bw, y, x + bw, y + bh, colBorder, 1);
+    ov.drawText(x + 14.0f, y + 8.0f, text, 0xE7EFFB, 14);
+}
+
 // ---- 方案 B：在调用线程（游戏渲染线程）内直接绘制覆盖层 ----
 // ESP 仍逐帧重绘；菜单使用离屏缓存，静态时每帧只 memcpy 面板区域。
 static void esp_draw_overlay() {
@@ -1431,15 +1510,16 @@ static void esp_draw_overlay() {
 
     bool espOn = g_espEnabled.load(std::memory_order_acquire);
     bool menuOpen = g_menuVisible.load(std::memory_order_acquire);
-    if (!espOn && !menuOpen) return;
+    bool toastActive = toast_active();
+    if (!espOn && !menuOpen && !toastActive) return;
 
     int w = 0, h = 0;
     if (!g_overlay.lockNoClear(w, h) || w <= 0 || h <= 0) return;
 
     bool renderMenu = menuOpen && menu_need_render(w, h);
 
-    // ESP 开启或菜单缓存需要重绘时才整屏清空；静态菜单直接复用上一帧缓冲。
-    if (espOn || renderMenu) {
+    // ESP / 菜单缓存重绘 / 右下角 Toast 需要清空；纯静态菜单复用上一帧缓冲。
+    if (espOn || renderMenu || toastActive) {
         g_overlay.lock(w, h);
     }
 
@@ -1487,6 +1567,7 @@ static void esp_draw_overlay() {
 
     if (renderMenu) render_menu_cache(w, h);
     if (menuOpen) blit_menu_cache(w, h);
+    if (toastActive) draw_toast(g_overlay, w, h);
 
     g_overlay.present();
 }
@@ -1499,12 +1580,12 @@ void esp_on_swap() {
     if (!g_running) return;
     bool enabled = g_espEnabled.load(std::memory_order_acquire);
     bool menuOpen = g_menuVisible.load(std::memory_order_acquire);
+    bool toastActive = toast_active();
 
-    // 空闲优化：ESP 关、菜单关、攻击/放置门控都关时，完全不碰 JVM，
-    // SwapBuffers 钩子只做一次原子判断就返回。
+    // 空闲优化：ESP 关、菜单关、门控关、无 Toast 时，完全不碰 JVM。
     ClickerSnapshot idleSnap = clicker_snapshot();
     bool needCombat = menuOpen || idleSnap.settings.attackGate || idleSnap.settings.placeGate;
-    if (!enabled && !needCombat) {
+    if (!enabled && !needCombat && !toastActive) {
         // 空闲预热：每 1s 尝试一次符号解析。这样第一次按 Insert 打开菜单时
         // JNI 符号早已就绪，不会把解析开销压在开菜单那一帧上。
         if (!jvm_ready()) {
@@ -1581,8 +1662,8 @@ void esp_on_swap() {
         g_trajectories.swap(trajs);
         ++g_dataSeq;
     }
-    // ESP 或菜单任一需要显示时，在游戏渲染线程同步绘制（零延迟贴合）。
-    if ((enabled || menuOpen) &&
+    // ESP / 菜单 / 右下角 Toast 任一需要显示时，在游戏渲染线程同步绘制。
+    if ((enabled || menuOpen || toastActive) &&
         g_overlayVisible.load(std::memory_order_acquire) && !cam.guiOpen)
         esp_draw_overlay();
 }
@@ -1657,8 +1738,9 @@ static void render_loop(HWND gameHwnd) {
         }
 
         // ============ 统一可见性状态管理 ============
-        // ESP 或菜单任一开启就显示覆盖层；状态翻转才操作窗口。
-        bool wantVisible = g_espEnabled.load(std::memory_order_acquire) || menuOpen;
+        // ESP / 菜单 / 右下角 Toast 任一需要显示时显示覆盖层。
+        bool toastActive = toast_active();
+        bool wantVisible = g_espEnabled.load(std::memory_order_acquire) || menuOpen || toastActive;
 
         // 界面检测：相机/界面状态由 SwapBuffers 钩子在游戏渲染线程每帧更新。
         if (wantVisible) {
@@ -1743,8 +1825,10 @@ extern "C" __declspec(dllexport) DWORD WINAPI esp_thread_main(LPVOID) {
     config_load(g_cfg);
     g_espEnabled = g_cfg.enabled;
     g_activeProfileAtomic.store(g_cfg.activeProfile, std::memory_order_release);
+    g_espKeyAtomic.store(g_cfg.espKey, std::memory_order_release);
     clicker_apply_settings(g_cfg.clicker);
     clicker_set_settings_changed_callback(on_clicker_hotkey_changed);
+    clicker_set_hotkey_toast_callback(on_clicker_hotkey_toast);
     clicker_set_running(g_cfg.clicker.enabled);
 
     HWND gameHwnd = nullptr;
