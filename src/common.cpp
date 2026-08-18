@@ -129,6 +129,29 @@ static uint32_t parse_color(const std::string& s, uint32_t def) {
     } catch (...) { return def; }
 }
 
+static void clamp_aim_settings(AimSettings& a) {
+    if (a.triggerMode < 0) a.triggerMode = 0;
+    if (a.triggerMode >= AIM_TRIGGER_COUNT) a.triggerMode = AIM_TRIGGER_HOLD_LMB;
+    if (a.priority < 0) a.priority = 0;
+    if (a.priority > AIM_PRIORITY_HEALTH) a.priority = AIM_PRIORITY_CROSSHAIR;
+    if (a.fov < 10.f) a.fov = 10.f;
+    if (a.fov > 180.f) a.fov = 180.f;
+    if (a.maxDistance < 5.0) a.maxDistance = 5.0;
+    if (a.maxDistance > 200.0) a.maxDistance = 200.0;
+    if (a.smooth < 1) a.smooth = 1;
+    if (a.smooth > 10) a.smooth = 10;
+    if (a.reactionMs < 0) a.reactionMs = 0;
+    if (a.reactionMs > 300) a.reactionMs = 300;
+    if (a.mouseSensitivity < 0.5f) a.mouseSensitivity = 0.5f;
+    if (a.mouseSensitivity > 2.0f) a.mouseSensitivity = 2.0f;
+    if (a.predictionTicks < 0) a.predictionTicks = 0;
+    if (a.predictionTicks > 20) a.predictionTicks = 20;
+    if (a.switchCooldownMs < 0) a.switchCooldownMs = 0;
+    if (a.switchCooldownMs > 2000) a.switchCooldownMs = 2000;
+    if (a.visualMode < 0) a.visualMode = 0;
+    if (a.visualMode > 3) a.visualMode = 3;
+}
+
 static void clamp_clicker_settings(ClickerSettings& cl) {
     if (cl.cpsLeft10 < 5) cl.cpsLeft10 = 5;
     if (cl.cpsRight10 < 5) cl.cpsRight10 = 5;
@@ -185,6 +208,7 @@ void config_load(EspConfig& cfg) {
             auto set = [&](bool& b) { b = parse_bool(val, b); };
             auto setd = [&](double& d) { d = parse_double(val, d); };
             auto seti = [&](int& i) { i = parse_int(val, i); };
+            auto setf = [&](float& f) { f = (float)parse_double(val, f); };
             auto setc = [&](uint32_t& c) { c = parse_color(val, c); };
             if (section == "esp") {
                 if (key == "enabled") set(cfg.enabled);
@@ -207,6 +231,23 @@ void config_load(EspConfig& cfg) {
                 else if (key == "renderHz") seti(cfg.renderHz);
                 else if (key == "showTrajectory") set(cfg.showTrajectory);
                 else if (key == "trajectoryTicks") seti(cfg.trajectoryTicks);
+            } else if (section == "aim") {
+                if (key == "enabled") set(cfg.aim.enabled);
+                else if (key == "triggerMode" || key == "mode") seti(cfg.aim.triggerMode);
+                else if (key == "triggerKey" || key == "key") seti(cfg.aim.triggerKey);
+                else if (key == "aimPlayers" || key == "players") set(cfg.aim.aimPlayers);
+                else if (key == "aimMobs" || key == "mobs") set(cfg.aim.aimMobs);
+                else if (key == "aimOthers" || key == "others") set(cfg.aim.aimOthers);
+                else if (key == "priority") seti(cfg.aim.priority);
+                else if (key == "fov") setf(cfg.aim.fov);
+                else if (key == "maxDistance") setd(cfg.aim.maxDistance);
+                else if (key == "smooth") seti(cfg.aim.smooth);
+                else if (key == "reactionMs") seti(cfg.aim.reactionMs);
+                else if (key == "mouseSensitivity" || key == "sensitivity") setf(cfg.aim.mouseSensitivity);
+                else if (key == "predictionTicks") seti(cfg.aim.predictionTicks);
+                else if (key == "switchCooldownMs") seti(cfg.aim.switchCooldownMs);
+                else if (key == "visualMode") seti(cfg.aim.visualMode);
+                else if (key == "visibleOnly") set(cfg.aim.visibleOnly);
             } else if (section == "clicker" || section.rfind("clickerProfile", 0) == 0) {
                 if (section == "clicker" && key == "profileKey") {
                     seti(cfg.profileKey);
@@ -255,6 +296,8 @@ void config_load(EspConfig& cfg) {
                 else if (key == "trajectoryOther") setc(cfg.colTrajOther);
                 else if (key == "land") setc(cfg.colLand);
                 else if (key == "landHit") setc(cfg.colLandHit);
+                else if (key == "aim") setc(cfg.colAim);
+                else if (key == "aimLock") setc(cfg.colAimLock);
             }
         } else {
             line += c;
@@ -271,6 +314,7 @@ void config_load(EspConfig& cfg) {
     } else {
         for (int i = 0; i < EspConfig::kClickerProfiles; ++i) cfg.profiles[i] = cfg.clicker;
     }
+    clamp_aim_settings(cfg.aim);
     clamp_clicker_settings(cfg.clicker);
     for (int i = 0; i < EspConfig::kClickerProfiles; ++i) clamp_clicker_settings(cfg.profiles[i]);
 }
@@ -336,6 +380,24 @@ void config_save(const EspConfig& cfg) {
     for (int i = 0; i < EspConfig::kClickerProfiles; ++i)
         saveClicker(cfg.profiles[i], "[clickerProfile" + std::to_string(i + 1) + "]", false);
 
+    line("[aim]");
+    line((std::string("enabled = ") + b2s(cfg.aim.enabled) + "              ; 自瞄总开关（默认关闭）").c_str());
+    line((std::string("triggerMode = ") + std::to_string(cfg.aim.triggerMode) + "            ; 0=按住左键 1=按住右键 2=按住自瞄键 3=切换 4=始终").c_str());
+    line((std::string("triggerKey = ") + std::to_string(cfg.aim.triggerKey) + "              ; VK_XBUTTON1 = 5（自瞄键）").c_str());
+    line((std::string("aimPlayers = ") + b2s(cfg.aim.aimPlayers)).c_str());
+    line((std::string("aimMobs = ") + b2s(cfg.aim.aimMobs)).c_str());
+    line((std::string("aimOthers = ") + b2s(cfg.aim.aimOthers)).c_str());
+    line((std::string("priority = ") + std::to_string(cfg.aim.priority) + "               ; 0=准星最近 1=距离最近 2=血量最低").c_str());
+    line((std::string("fov = ") + std::to_string(cfg.aim.fov) + "                    ; 自瞄视野全角（度）").c_str());
+    line((std::string("maxDistance = ") + std::to_string(cfg.aim.maxDistance) + "              ; 自瞄最大距离（格）").c_str());
+    line((std::string("smooth = ") + std::to_string(cfg.aim.smooth) + "                 ; 平滑度 1..10，越大越缓").c_str());
+    line((std::string("reactionMs = ") + std::to_string(cfg.aim.reactionMs) + "              ; 锁定新目标反应延迟（毫秒）").c_str());
+    line((std::string("mouseSensitivity = ") + std::to_string(cfg.aim.mouseSensitivity) + "          ; 鼠标移动倍率 0.5..2.0").c_str());
+    line((std::string("predictionTicks = ") + std::to_string(cfg.aim.predictionTicks) + "          ; 预判目标移动 0..20 tick").c_str());
+    line((std::string("switchCooldownMs = ") + std::to_string(cfg.aim.switchCooldownMs) + "        ; 切换目标冷却（毫秒）").c_str());
+    line((std::string("visualMode = ") + std::to_string(cfg.aim.visualMode) + "              ; 0=关 1=目标点 2=+瞄准线 3=+FOV 圈").c_str());
+    line((std::string("visibleOnly = ") + b2s(cfg.aim.visibleOnly) + "           ; 仅瞄准视线可达目标").c_str());
+
     line("[colors]");
     char cb[64];
     auto color_line = [&](const char* key, uint32_t v, const char* note = nullptr) {
@@ -352,6 +414,8 @@ void config_save(const EspConfig& cfg) {
     color_line("trajectoryOther", cfg.colTrajOther, "其他玩家弓蓄力抛物线：红");
     color_line("land", cfg.colLand, "弓预判落点方块：蓝");
     color_line("landHit", cfg.colLandHit, "弓预判命中实体方块：红");
+    color_line("aim", cfg.colAim, "自瞄目标点（未锁定）");
+    color_line("aimLock", cfg.colAimLock, "自瞄目标点（已锁定）");
 
     HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
                            nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);

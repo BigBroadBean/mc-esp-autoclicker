@@ -60,6 +60,43 @@ struct ClickerSettings {
 };
 
 // ------------------------------------------------------------
+// 自瞄配置
+// ------------------------------------------------------------
+enum AimTriggerMode {
+    AIM_TRIGGER_HOLD_LMB = 0,   // 按住鼠标左键时瞄准
+    AIM_TRIGGER_HOLD_RMB,       // 按住鼠标右键时瞄准
+    AIM_TRIGGER_HOLD_KEY,       // 按住自瞄键时瞄准
+    AIM_TRIGGER_TOGGLE,         // 自瞄键切换 开/关
+    AIM_TRIGGER_ALWAYS,         // 始终瞄准
+    AIM_TRIGGER_COUNT
+};
+
+enum AimPriority {
+    AIM_PRIORITY_CROSSHAIR = 0, // 优先离准星最近的目标
+    AIM_PRIORITY_DISTANCE,      // 优先最近的目标
+    AIM_PRIORITY_HEALTH         // 优先血量最低的目标
+};
+
+struct AimSettings {
+    bool    enabled          = false;       // 自瞄总开关（默认关闭）
+    int     triggerMode      = AIM_TRIGGER_HOLD_LMB;   // 触发模式
+    int     triggerKey       = VK_XBUTTON1; // 按住/切换自瞄的热键
+    bool    aimPlayers       = true;        // 瞄准玩家
+    bool    aimMobs          = true;        // 瞄准生物
+    bool    aimOthers        = false;       // 瞄准其他实体
+    int     priority         = AIM_PRIORITY_CROSSHAIR;  // 目标优先级
+    float   fov              = 90.0f;       // 瞄准视野范围（全角，度）：准星周围 ±fov/2
+    double  maxDistance      = 60.0;        // 最大瞄准距离（格）
+    int     smooth           = 6;           // 平滑度 1..10（越大越像人手缓动）
+    int     reactionMs       = 100;         // 锁定新目标后的反应延迟（毫秒）
+    float   mouseSensitivity = 1.0f;        // 鼠标移动倍率 0.5..2.0
+    int     predictionTicks  = 0;           // 预判目标移动 tick 数 0..20
+    int     switchCooldownMs = 300;         // 切换目标冷却（毫秒）
+    int     visualMode       = 3;           // 0=不显示 1=目标点 2=+瞄准线 3=+FOV 圈
+    bool    visibleOnly      = true;        // 仅瞄准视线可达目标（墙壁后不瞄）
+};
+
+// ------------------------------------------------------------
 // 配置（esp.ini，UTF-8 / ANSI 均可）
 // ------------------------------------------------------------
 struct EspConfig {
@@ -85,6 +122,9 @@ struct EspConfig {
     bool    showTrajectory   = true;        // 渲染敌方弹射物的预测飞行轨迹折线
     int     trajectoryTicks  = 40;          // 轨迹预测长度（游戏 tick 数，20 tick = 1 秒）
 
+    // 自瞄
+    AimSettings aim;
+
     // 连点器
     ClickerSettings clicker;             // 当前激活方案（运行时使用）
     static constexpr int kClickerProfiles = 4;
@@ -100,6 +140,8 @@ struct EspConfig {
     uint32_t colTrajOther = 0xFF0000;       // 其他玩家弓蓄力抛物线：红（区分本地玩家轨迹）
     uint32_t colLand    = 0x00A0FF;         // 弓预判落点方块：蓝半透明
     uint32_t colLandHit = 0xFF0000;         // 弓预判命中实体方块：红（红石）
+    uint32_t colAim     = 0x00FFAA;         // 自瞄目标点（未锁定碰撞箱）
+    uint32_t colAimLock = 0xFFFFFF;         // 自瞄目标点（已锁定碰撞箱）
 };
 
 // 从 data_directory() 读取 esp.ini；不存在时写入默认配置。

@@ -11,6 +11,7 @@
 #include "overlay.h"
 #include "glrender.h"
 #include "clicker.h"
+#include "aimbot.h"
 
 #include <windowsx.h>   // GET_X_LPARAM / GET_Y_LPARAM / GET_WHEEL_DELTA_WPARAM
 
@@ -658,11 +659,12 @@ static void project_other_bow_predicts(const CamData& cam,
 //     门控页：攻击门控及其热键 / 放置门控及其热键 / 光标门控 / 游戏内门控
 //     高级页：随机 CPS / 拟人化 / CPS 上限 / 定时停止
 //     ESP 页：开关 / 过滤 / 盒子 / 名字 / 射线 / 距离 / 轨迹
+//     自瞄页：开关 / 触发模式 / 目标过滤 / 优先级 / 平滑 / 可视化
 //     系统页：配置方案 / 方案热键
 // ============================================================
 
-enum MenuPage { PAGE_CLICK = 0, PAGE_GATE, PAGE_ADV, PAGE_ESP, PAGE_SYS, PAGE_COUNT };
-static const wchar_t* kPageNames[PAGE_COUNT] = { L"连点", L"门控", L"高级", L"ESP", L"系统" };
+enum MenuPage { PAGE_CLICK = 0, PAGE_GATE, PAGE_ADV, PAGE_ESP, PAGE_AIM, PAGE_SYS, PAGE_COUNT };
+static const wchar_t* kPageNames[PAGE_COUNT] = { L"连点", L"门控", L"高级", L"ESP", L"自瞄", L"系统" };
 
 enum MenuItem {
     MI_CLICKER = 0,
@@ -682,39 +684,63 @@ enum MenuItem {
     MI_ESP_NAME, MI_ESP_TRACER,
     MI_ESP_LINE, MI_ESP_DIST,
     MI_ESP_TRAJ, MI_ESP_TRAJ_TICKS,
+    MI_AIM, MI_AIM_MODE, MI_AIM_KEY,
+    MI_AIM_PLAYERS, MI_AIM_MOBS, MI_AIM_OTHERS,
+    MI_AIM_PRIORITY,
+    MI_AIM_FOV, MI_AIM_DIST,
+    MI_AIM_SMOOTH, MI_AIM_REACTION, MI_AIM_SENS, MI_AIM_PREDICT,
+    MI_AIM_COOLDOWN, MI_AIM_VISIBLE, MI_AIM_VISUAL,
     MI_PROFILE, MI_PROFILE_KEY,
     MI_COUNT
 };
 
-static constexpr int kMenuMaxRows = 14;
+static constexpr int kMenuMaxRows = 16;
 static const int kPageClickItems[kMenuMaxRows] = {
     MI_CLICKER, MI_LEFT, MI_LEFT_CPS, MI_LEFT_PRESET,
     MI_RIGHT, MI_RIGHT_CPS, MI_RIGHT_PRESET,
-    MI_KEEP, MI_HOTKEY, -1, -1, -1, -1, -1
+    MI_KEEP, MI_HOTKEY, -1, -1, -1, -1, -1,
+    -1, -1
 };
+
 static const int kPageGateItems[kMenuMaxRows] = {
     MI_ATTACK_GATE, MI_ATTACK_KEY, MI_PLACE_GATE, MI_PLACE_KEY,
-    MI_CURSOR_GATE, MI_INGAME_GATE, -1, -1, -1, -1, -1, -1, -1, -1
+    MI_CURSOR_GATE, MI_INGAME_GATE, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1
 };
+
 static const int kPageAdvItems[kMenuMaxRows] = {
     MI_RANDOM, MI_RANDOM_RANGE, MI_HUMAN_MODE, MI_HUMAN_LEVEL,
-    MI_CPS_MAX, MI_AUTOSTOP, MI_AUTOSTOP_SEC, -1, -1, -1, -1, -1, -1, -1
+    MI_CPS_MAX, MI_AUTOSTOP, MI_AUTOSTOP_SEC, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1
 };
+
 static const int kPageEspItems[kMenuMaxRows] = {
     MI_ESP, MI_ESP_KEY,
     MI_ESP_PLAYERS, MI_ESP_MOBS, MI_ESP_OTHERS,
     MI_ESP_BOX3D, MI_ESP_BOX2D, MI_ESP_FILL,
     MI_ESP_NAME, MI_ESP_TRACER,
     MI_ESP_LINE, MI_ESP_DIST,
-    MI_ESP_TRAJ, MI_ESP_TRAJ_TICKS
+    MI_ESP_TRAJ, MI_ESP_TRAJ_TICKS,
+    -1, -1
+};
+
+static const int kPageAimItems[kMenuMaxRows] = {
+    MI_AIM, MI_AIM_MODE, MI_AIM_KEY,
+    MI_AIM_PLAYERS, MI_AIM_MOBS, MI_AIM_OTHERS,
+    MI_AIM_PRIORITY,
+    MI_AIM_FOV, MI_AIM_DIST,
+    MI_AIM_SMOOTH, MI_AIM_REACTION, MI_AIM_SENS, MI_AIM_PREDICT,
+    MI_AIM_COOLDOWN, MI_AIM_VISIBLE, MI_AIM_VISUAL
 };
 static const int kPageSysItems[kMenuMaxRows] = {
-    MI_PROFILE, MI_PROFILE_KEY, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1
+    MI_PROFILE, MI_PROFILE_KEY, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1
 };
+
 static const int* kPageItems[PAGE_COUNT] = {
-    kPageClickItems, kPageGateItems, kPageAdvItems, kPageEspItems, kPageSysItems
+    kPageClickItems, kPageGateItems, kPageAdvItems, kPageEspItems, kPageAimItems, kPageSysItems
 };
-static const int kPageRowCount[PAGE_COUNT] = { 9, 6, 7, 14, 2 };
+static const int kPageRowCount[PAGE_COUNT] = { 9, 6, 7, 14, 16, 2 };
 
 struct MenuItemDef { const wchar_t* label; const wchar_t* tip; };
 static const MenuItemDef kMenuItemDefs[MI_COUNT] = {
@@ -754,11 +780,32 @@ static const MenuItemDef kMenuItemDefs[MI_COUNT] = {
     { L"最大距离",     L"只绘制此距离内的实体，10..500 格。" },
     { L"弹射物轨迹",   L"预测箭/雪球/末影珍珠飞行轨迹与弓蓄力抛物线。" },
     { L"轨迹 tick",    L"弹射物轨迹预测长度，5..63 tick（20 tick = 1 秒）。" },
+    { L"自瞄",         L"自瞄总开关。准星在碰撞箱外时瞄向最近表面点，命中后转为视平线高度中心。" },
+    { L"触发模式",     L"按住左键 / 按住右键 / 按住自瞄键 / 自瞄键切换 / 始终瞄准。" },
+    { L"自瞄键",       L"按住或切换自瞄的快捷键；Enter 后按任意键绑定。" },
+    { L"目标玩家",     L"是否把玩家纳入自瞄目标。" },
+    { L"目标生物",     L"是否把怪物/动物等生物纳入自瞄目标。" },
+    { L"目标其他",     L"是否把其他实体纳入自瞄目标（弹射物永远排除）。" },
+    { L"优先目标",     L"准星最近：离准星角距最小；距离最近；血量最低。" },
+    { L"视野范围",     L"只瞄准准星周围该角度范围内的目标，10..180 度（全角）。" },
+    { L"最大距离",     L"只瞄准此距离内的目标，5..200 格。" },
+    { L"平滑度",       L"鼠标移动平滑度：1 快，10 最缓，数值越大越像人手。" },
+    { L"反应延迟",     L"锁定新目标后的反应停顿，0..300 毫秒。" },
+    { L"鼠标灵敏度",   L"自瞄移动倍率，0.5..2.0。游戏灵敏度变化时可微调。" },
+    { L"预判 tick",    L"按目标当前速度外推 0..20 tick，0 为不预判。" },
+    { L"切换冷却",     L"锁定新目标后此时间内不切换目标，0..2000 毫秒。" },
+    { L"视线检测",     L"开启后墙壁后的目标不会自瞄；关闭可穿墙瞄准。" },
+    { L"自瞄显示",     L"0=不显示 1=目标点 2=目标点+瞄准线 3=再显示 FOV 圈。" },
     { L"配置方案",     L"切换整套连点参数方案，4 套方案独立保存。" },
     { L"方案热键",     L"游戏内按此键循环切换 4 套连点方案；Enter 后按任意键绑定。" },
 };
 
 static const wchar_t* kHumanNames[4] = { L"均匀", L"双击连招", L"呼吸波动", L"疲劳递减" };
+static const wchar_t* kAimModeNames[AIM_TRIGGER_COUNT] = {
+    L"按住左键", L"按住右键", L"按住自瞄键", L"自瞄键切换", L"始终瞄准"
+};
+static const wchar_t* kAimPriorityNames[3] = { L"准星最近", L"距离最近", L"血量最低" };
+static const wchar_t* kAimVisualNames[4] = { L"关闭", L"目标点", L"点+线", L"全部" };
 
 // ---- 菜单缓存与状态 ----
 struct MenuCache {
@@ -835,7 +882,11 @@ static int menu_item_for_row(int row) {
 static bool menu_is_slider(int item) {
     return item == MI_LEFT_CPS || item == MI_RIGHT_CPS || item == MI_RANDOM_RANGE ||
            item == MI_HUMAN_LEVEL || item == MI_CPS_MAX || item == MI_AUTOSTOP_SEC ||
-           item == MI_ESP_LINE || item == MI_ESP_DIST || item == MI_ESP_TRAJ_TICKS;
+           item == MI_ESP_LINE || item == MI_ESP_DIST || item == MI_ESP_TRAJ_TICKS ||
+           item == MI_AIM_FOV || item == MI_AIM_DIST ||
+           item == MI_AIM_SMOOTH || item == MI_AIM_REACTION ||
+           item == MI_AIM_SENS || item == MI_AIM_PREDICT ||
+           item == MI_AIM_COOLDOWN;
 }
 
 static void menu_slider_rect_local(int panelW, int row, int& x0, int& x1) {
@@ -860,6 +911,13 @@ static float menu_slider_norm(int item, const EspConfig& cfg) {
     case MI_ESP_LINE:     return clamp01((float)(cfg.lineWidth - 1) / 4.0f);
     case MI_ESP_DIST:     { float d = (float)cfg.maxDistance; if (d < 10.f) d = 10.f; if (d > 500.f) d = 500.f; return (d - 10.f) / 490.f; }
     case MI_ESP_TRAJ_TICKS: return clamp01((float)(cfg.trajectoryTicks - 5) / 58.0f);
+    case MI_AIM_FOV:      return clamp01((cfg.aim.fov - 10.f) / 170.f);
+    case MI_AIM_DIST:     { float d = (float)cfg.aim.maxDistance; if (d < 5.f) d = 5.f; if (d > 200.f) d = 200.f; return (d - 5.f) / 195.f; }
+    case MI_AIM_SMOOTH:   return clamp01((float)(cfg.aim.smooth - 1) / 9.0f);
+    case MI_AIM_REACTION: return clamp01((float)cfg.aim.reactionMs / 300.0f);
+    case MI_AIM_SENS:     return clamp01((cfg.aim.mouseSensitivity - 0.5f) / 1.5f);
+    case MI_AIM_PREDICT:  return clamp01((float)cfg.aim.predictionTicks / 20.0f);
+    case MI_AIM_COOLDOWN: return clamp01((float)cfg.aim.switchCooldownMs / 2000.0f);
     default: return 0.0f;
     }
 }
@@ -878,6 +936,13 @@ static void menu_slider_apply(int item, float t, EspConfig& cfg) {
     case MI_ESP_LINE: { int v = 1 + (int)(t * 4.0f + 0.5f); if (v < 1) v = 1; if (v > 5) v = 5; cfg.lineWidth = v; break; }
     case MI_ESP_DIST: { int v = 10 + (int)(t * 490.0f + 0.5f); if (v < 10) v = 10; if (v > 500) v = 500; cfg.maxDistance = v; break; }
     case MI_ESP_TRAJ_TICKS: { int v = 5 + (int)(t * 58.0f + 0.5f); if (v < 5) v = 5; if (v > 63) v = 63; cfg.trajectoryTicks = v; break; }
+    case MI_AIM_FOV: { int v = 10 + (int)(t * 170.0f + 0.5f); if (v < 10) v = 10; if (v > 180) v = 180; cfg.aim.fov = (float)v; break; }
+    case MI_AIM_DIST: { int v = 5 + (int)(t * 195.0f + 0.5f); if (v < 5) v = 5; if (v > 200) v = 200; cfg.aim.maxDistance = v; break; }
+    case MI_AIM_SMOOTH: { int v = 1 + (int)(t * 9.0f + 0.5f); if (v < 1) v = 1; if (v > 10) v = 10; cfg.aim.smooth = v; break; }
+    case MI_AIM_REACTION: { int v = (int)(t * 300.0f + 0.5f); if (v < 0) v = 0; if (v > 300) v = 300; cfg.aim.reactionMs = v; break; }
+    case MI_AIM_SENS: { float v = 0.5f + t * 1.5f; if (v < 0.5f) v = 0.5f; if (v > 2.0f) v = 2.0f; cfg.aim.mouseSensitivity = v; break; }
+    case MI_AIM_PREDICT: { int v = (int)(t * 20.0f + 0.5f); if (v < 0) v = 0; if (v > 20) v = 20; cfg.aim.predictionTicks = v; break; }
+    case MI_AIM_COOLDOWN: { int v = (int)(t * 2000.0f + 0.5f); if (v < 0) v = 0; if (v > 2000) v = 2000; cfg.aim.switchCooldownMs = v; break; }
     default: break;
     }
 }
@@ -885,6 +950,7 @@ static void menu_slider_apply(int item, float t, EspConfig& cfg) {
 static void commit_config() {
     g_cfg.profiles[g_cfg.activeProfile] = g_cfg.clicker;
     clicker_apply_settings(g_cfg.clicker);
+    aimbot_apply_settings(g_cfg.aim);
     esp_cfg_publish();
     config_save(g_cfg);
     g_menuDirty.store(true, std::memory_order_release);
@@ -998,6 +1064,23 @@ static void menu_adjust(int item, int dir, bool fast) {
     case MI_ESP_DIST: { int step = fast ? 50 : 10; int v = (int)cfg.maxDistance + dir * step; if (v < 10) v = 10; if (v > 500) v = 500; cfg.maxDistance = v; break; }
     case MI_ESP_TRAJ_TICKS: { int step = fast ? 10 : 1; int v = cfg.trajectoryTicks + dir * step; if (v < 5) v = 5; if (v > 63) v = 63; cfg.trajectoryTicks = v; break; }
 
+    // ---- 自瞄页 ----
+    case MI_AIM: cfg.aim.enabled = !cfg.aim.enabled; break;
+    case MI_AIM_MODE: { int v = cfg.aim.triggerMode + dir; if (v < 0) v = AIM_TRIGGER_COUNT - 1; if (v >= AIM_TRIGGER_COUNT) v = 0; cfg.aim.triggerMode = v; break; }
+    case MI_AIM_PLAYERS: cfg.aim.aimPlayers = !cfg.aim.aimPlayers; break;
+    case MI_AIM_MOBS: cfg.aim.aimMobs = !cfg.aim.aimMobs; break;
+    case MI_AIM_OTHERS: cfg.aim.aimOthers = !cfg.aim.aimOthers; break;
+    case MI_AIM_PRIORITY: { int v = cfg.aim.priority + dir; if (v < 0) v = AIM_PRIORITY_HEALTH; if (v > AIM_PRIORITY_HEALTH) v = 0; cfg.aim.priority = v; break; }
+    case MI_AIM_FOV: { int step = fast ? 10 : 5; int v = (int)cfg.aim.fov + dir * step; if (v < 10) v = 10; if (v > 180) v = 180; cfg.aim.fov = (float)v; break; }
+    case MI_AIM_DIST: { int step = fast ? 20 : 5; int v = (int)cfg.aim.maxDistance + dir * step; if (v < 5) v = 5; if (v > 200) v = 200; cfg.aim.maxDistance = v; break; }
+    case MI_AIM_SMOOTH: { int v = cfg.aim.smooth + dir; if (v < 1) v = 1; if (v > 10) v = 10; cfg.aim.smooth = v; break; }
+    case MI_AIM_REACTION: { int step = fast ? 50 : 10; int v = cfg.aim.reactionMs + dir * step; if (v < 0) v = 0; if (v > 300) v = 300; cfg.aim.reactionMs = v; break; }
+    case MI_AIM_SENS: { float step = fast ? 0.1f : 0.05f; float v = cfg.aim.mouseSensitivity + dir * step; if (v < 0.5f) v = 0.5f; if (v > 2.0f) v = 2.0f; cfg.aim.mouseSensitivity = v; break; }
+    case MI_AIM_PREDICT: { int step = fast ? 5 : 1; int v = cfg.aim.predictionTicks + dir * step; if (v < 0) v = 0; if (v > 20) v = 20; cfg.aim.predictionTicks = v; break; }
+    case MI_AIM_COOLDOWN: { int step = fast ? 200 : 50; int v = cfg.aim.switchCooldownMs + dir * step; if (v < 0) v = 0; if (v > 2000) v = 2000; cfg.aim.switchCooldownMs = v; break; }
+    case MI_AIM_VISIBLE: cfg.aim.visibleOnly = !cfg.aim.visibleOnly; break;
+    case MI_AIM_VISUAL: { int v = cfg.aim.visualMode + dir; if (v < 0) v = 3; if (v > 3) v = 0; cfg.aim.visualMode = v; break; }
+
     default: return;
     }
     commit_config();
@@ -1019,6 +1102,7 @@ static void menu_capture_commit(int vk) {
     case MI_PLACE_KEY: g_cfg.clicker.placeGateKey = vk; break;
     case MI_ESP_KEY: g_cfg.espKey = vk; g_espKeyAtomic.store(vk, std::memory_order_release); break;
     case MI_PROFILE_KEY: g_cfg.profileKey = vk; g_profileKeyAtomic.store(vk, std::memory_order_release); break;
+    case MI_AIM_KEY: g_cfg.aim.triggerKey = vk; break;
     default: break;
     }
     g_menuCaptureKey.store(false, std::memory_order_release);
@@ -1032,13 +1116,15 @@ static bool key_down_any(int vk) {
 
 static void menu_activate_item(int item) {
     switch (item) {
-    case MI_HOTKEY: case MI_ATTACK_KEY: case MI_PLACE_KEY: case MI_ESP_KEY: case MI_PROFILE_KEY:
+    case MI_HOTKEY: case MI_ATTACK_KEY: case MI_PLACE_KEY: case MI_ESP_KEY:
+    case MI_PROFILE_KEY: case MI_AIM_KEY:
         g_menuCaptureTarget.store(item, std::memory_order_release);
         g_menuCaptureKey.store(true, std::memory_order_release);
         g_menuDirty.store(true, std::memory_order_release);
         esp_log("[menu] 等待按下新热键…");
         break;
     case MI_PROFILE: case MI_LEFT_PRESET: case MI_RIGHT_PRESET: case MI_HUMAN_MODE:
+    case MI_AIM_MODE: case MI_AIM_PRIORITY: case MI_AIM_VISUAL:
         menu_adjust(item, 1, false);
         break;
     default:
@@ -1089,6 +1175,7 @@ static void menu_mouse_down(int x, int y) {
         float t = (float)((x - px) - x0) / (float)(x1 - x0);
         menu_slider_apply(item, t, g_cfg);
         clicker_apply_settings(g_cfg.clicker);
+        aimbot_apply_settings(g_cfg.aim);
         esp_cfg_publish();   // ESP 滑块拖动期间也发布新值，游戏线程立即可见
         g_menuDirty.store(true, std::memory_order_release);
     } else {
@@ -1111,6 +1198,7 @@ static void menu_mouse_move(int x, int y, bool leftDown) {
             float t = (float)((x - px) - x0) / (float)(x1 - x0);
             menu_slider_apply(item, t, g_cfg);
             clicker_apply_settings(g_cfg.clicker);
+            aimbot_apply_settings(g_cfg.aim);
             esp_cfg_publish();   // ESP 滑块拖动期间也发布新值，游戏线程立即可见
             // 拖动节流：缓存重绘约 60Hz，避免每个 WM_MOUSEMOVE 都整面板重画
             static DWORD lastSliderRender = 0;
@@ -1488,6 +1576,22 @@ static void draw_menu_panel(Overlay& ov, int panelW, int panelH, const EspConfig
         case MI_ESP_LINE: swprintf(buf, 128, L"%d px", cfg.lineWidth); value = buf; color = colAcc; break;
         case MI_ESP_DIST: swprintf(buf, 128, L"%d", (int)cfg.maxDistance); value = buf; color = colAcc; break;
         case MI_ESP_TRAJ_TICKS: swprintf(buf, 128, L"%d tick", cfg.trajectoryTicks); value = buf; color = colAcc; break;
+        case MI_AIM: value = cfg.aim.enabled ? on : off; color = cfg.aim.enabled ? colOn : colOff; break;
+        case MI_AIM_MODE: value = kAimModeNames[cfg.aim.triggerMode % AIM_TRIGGER_COUNT]; color = colAcc; break;
+        case MI_AIM_KEY: value = clicker_key_name(cfg.aim.triggerKey); color = colAcc; break;
+        case MI_AIM_PLAYERS: value = cfg.aim.aimPlayers ? on : off; color = cfg.aim.aimPlayers ? colOn : colOff; break;
+        case MI_AIM_MOBS: value = cfg.aim.aimMobs ? on : off; color = cfg.aim.aimMobs ? colOn : colOff; break;
+        case MI_AIM_OTHERS: value = cfg.aim.aimOthers ? on : off; color = cfg.aim.aimOthers ? colOn : colOff; break;
+        case MI_AIM_PRIORITY: value = kAimPriorityNames[cfg.aim.priority % 3]; color = colAcc; break;
+        case MI_AIM_FOV: swprintf(buf, 128, L"%d°", (int)cfg.aim.fov); value = buf; color = colAcc; break;
+        case MI_AIM_DIST: swprintf(buf, 128, L"%d", (int)cfg.aim.maxDistance); value = buf; color = colAcc; break;
+        case MI_AIM_SMOOTH: swprintf(buf, 128, L"%d / 10", cfg.aim.smooth); value = buf; color = colAcc; break;
+        case MI_AIM_REACTION: swprintf(buf, 128, L"%d ms", cfg.aim.reactionMs); value = buf; color = colAcc; break;
+        case MI_AIM_SENS: swprintf(buf, 128, L"%.2f", cfg.aim.mouseSensitivity); value = buf; color = colAcc; break;
+        case MI_AIM_PREDICT: swprintf(buf, 128, L"%d tick", cfg.aim.predictionTicks); value = buf; color = colAcc; break;
+        case MI_AIM_COOLDOWN: swprintf(buf, 128, L"%d ms", cfg.aim.switchCooldownMs); value = buf; color = colAcc; break;
+        case MI_AIM_VISIBLE: value = cfg.aim.visibleOnly ? on : off; color = cfg.aim.visibleOnly ? colOn : colOff; break;
+        case MI_AIM_VISUAL: value = kAimVisualNames[cfg.aim.visualMode % 4]; color = colAcc; break;
         }
 
         float ry = (float)(rowsTop + i * kMenuRowH);
@@ -1531,11 +1635,12 @@ static void draw_menu_panel(Overlay& ov, int panelW, int panelH, const EspConfig
     }
 
     int fy = tipY + kMenuTipH - 1;
-    swprintf(buf, 128, L"状态  游戏:%s  攻击:%s  放置:%s  %s",
+    swprintf(buf, 128, L"状态  游戏:%s  攻击:%s  放置:%s  连点:%s  自瞄:%s",
              cs.combatReady ? (cs.inGame ? L"内" : L"外") : L"未就绪",
              cs.combatReady ? (cs.canAttack ? L"可" : L"否") : L"未就绪",
              cs.combatReady ? (cs.canPlace ? L"可" : L"否") : L"未就绪",
-             cs.running ? L"连点中" : L"已停止");
+             cs.running ? L"开" : L"关",
+             cfg.aim.enabled ? L"开" : L"关");
     ov.drawText(10, (float)fy, buf, colDim, 12);
 }
 
@@ -1793,6 +1898,44 @@ static void status_bar_blit(int w, int h, bool toastActive) {
 }
 
 // ---- 方案 B：在调用线程（游戏渲染线程）内直接绘制覆盖层 ----
+static void draw_circle_outline(Overlay& ov, float cx, float cy, float r,
+                                 uint32_t rgb, int width) {
+    const int seg = 48;
+    float px = cx + r, py = cy;
+    for (int i = 1; i <= seg; ++i) {
+        const float a = (float)(2.0 * M_PI * i / seg);
+        const float nx = cx + std::cos(a) * r;
+        const float ny = cy + std::sin(a) * r;
+        ov.drawLine(px, py, nx, ny, rgb, width);
+        px = nx; py = ny;
+    }
+}
+
+static void draw_aim_visual(Overlay& ov, int w, int h, const EspConfig& cfg) {
+    AimTarget t;
+    aimbot_get_target(t);   // 无效时也会带回 fovRadiusPx
+    const float cx = (float)w * 0.5f;
+    const float cy = (float)h * 0.5f;
+
+    if (cfg.aim.visualMode >= 3 && t.fovRadiusPx > 1.0f)
+        draw_circle_outline(ov, cx, cy, t.fovRadiusPx, cfg.colAim, 1);
+
+    if (!t.valid) return;
+    const uint32_t col = t.locked ? cfg.colAimLock : cfg.colAim;
+
+    if (cfg.aim.visualMode >= 1) {
+        draw_circle_outline(ov, t.sx, t.sy, 9.0f, col, 1);
+        ov.drawLine(t.sx - 13.0f, t.sy, t.sx - 6.0f, t.sy, col, 1);
+        ov.drawLine(t.sx + 6.0f, t.sy, t.sx + 13.0f, t.sy, col, 1);
+        ov.drawLine(t.sx, t.sy - 13.0f, t.sx, t.sy - 6.0f, col, 1);
+        ov.drawLine(t.sx, t.sy + 6.0f, t.sx, t.sy + 13.0f, col, 1);
+        ov.fillCircle(t.sx, t.sy, 2.0f, 0x0A0F14);
+        ov.fillCircle(t.sx, t.sy, 1.0f, col);
+    }
+    if (cfg.aim.visualMode >= 2)
+        ov.drawLine(cx, cy, t.sx, t.sy, col, 1);
+}
+
 // ESP 仍逐帧重绘；菜单/状态栏使用离屏缓存，静态时只 memcpy 对应区域。
 static void esp_draw_overlay(const EspConfig& cfg) {
     // 先取预投影数据：swap 而不是 copy，避免每帧对两个 vector 重新分配。
@@ -1813,7 +1956,8 @@ static void esp_draw_overlay(const EspConfig& cfg) {
     bool toastActive = toast_active();
     // 状态栏与 ESP 开关解耦；菜单打开时由菜单页脚显示状态，不再叠画 HUD。
     bool statusOn = !menuOpen && status_bar_wanted();
-    if (!espOn && !menuOpen && !toastActive && !statusOn) return;
+    bool aimVisual = !menuOpen && aimbot_visual_wanted();
+    if (!espOn && !menuOpen && !toastActive && !statusOn && !aimVisual) return;
 
     int w = 0, h = 0;
     if (!g_overlay.lockNoClear(w, h) || w <= 0 || h <= 0) return;
@@ -1833,7 +1977,7 @@ static void esp_draw_overlay(const EspConfig& cfg) {
     static int  s_lastW = 0, s_lastH = 0;
 
     bool sizeChanged = (w != s_lastW || h != s_lastH);
-    bool needsFull = sizeChanged || espOn || renderMenu || toastActive ||
+    bool needsFull = sizeChanged || espOn || renderMenu || toastActive || aimVisual ||
                      (menuOpen != s_lastMenuOpen) ||
                      (statusOn && (statusChanged || !s_lastStatusDrawn || s_lastFrameFull));
 
@@ -1882,11 +2026,15 @@ static void esp_draw_overlay(const EspConfig& cfg) {
     }
 
     if (statusOn) status_bar_blit(w, h, toastActive);
+
+    // 自瞄可视化（目标点 / 瞄准线 / FOV 圈）
+    if (aimVisual) draw_aim_visual(g_overlay, w, h, cfg);
+
     if (renderMenu) render_menu_cache(w, h, cfg);
     if (menuOpen) blit_menu_cache(w, h);
     if (toastActive) draw_toast(g_overlay, w, h);
 
-    bool frameChanged = needsFull || statusChanged || toastActive ||
+    bool frameChanged = needsFull || statusChanged || toastActive || aimVisual ||
                         (menuOpen != s_lastMenuOpen);
     if (frameChanged) g_overlay.present();
 
@@ -1911,9 +2059,11 @@ void esp_on_swap() {
     bool toastActive = toast_active();
     // 状态栏与 ESP 解耦：ESP 或连点器任一开启都显示；连点器运行时需要相机与门控状态。
     bool statusOn = status_bar_wanted();
+    // 自瞄触发中：即使 ESP 关闭也要采集实体并计算目标点。
+    bool aimActive = aimbot_active();
 
-    // 空闲优化：ESP 关、菜单关、连点器关、无 Toast 时，完全不碰 JVM。
-    if (!enabled && !menuOpen && !toastActive && !statusOn) {
+    // 空闲优化：ESP 关、菜单关、连点器关、自瞄关、无 Toast 时，完全不碰 JVM。
+    if (!enabled && !menuOpen && !toastActive && !statusOn && !aimActive) {
         // 空闲预热：每 1s 尝试一次符号解析。这样第一次按 Insert 打开菜单时
         // JNI 符号早已就绪，不会把解析开销压在开菜单那一帧上。
         if (!jvm_ready()) {
@@ -1959,11 +2109,15 @@ void esp_on_swap() {
     std::vector<EntityData> entities;
     std::vector<ScreenBox> boxes;
     std::vector<TrajectoryData> trajs;
-    // 仅 ESP 启用时采集实体；连点器门控由 jvm_read_combat_status 单独完成。
-    if (enabled && !cam.guiOpen) {
-        jvm_collect_entities(cam.px, cam.py, cam.pz, cam.partialTick, entities);
-        // 帧间轻微平滑：抹平 20Hz tick 边界折角，框更丝滑（时间常数 smoothMs）
-        smooth_entities(entities, cfg.smoothMs);
+    // 自瞄在聊天界面也不采集（聊天时系统光标可见，移动鼠标只会在输入框里划）。
+    const bool aimCollect = aimActive && !cam.guiOpen && !cam.screenIsChat;
+    // ESP 或自瞄任一启用时采集实体；自瞄需要额外的速度/生命值数据。
+    if ((enabled || aimCollect) && !cam.guiOpen) {
+        jvm_collect_entities(cam.px, cam.py, cam.pz, cam.partialTick,
+                             aimCollect, cfg.aim.predictionTicks > 0, entities);
+        // 帧间轻微平滑：抹平 20Hz tick 边界折角，框更丝滑（时间常数 smoothMs）。
+        // 自瞄使用 rx（未平滑）位置，避免平滑延迟影响瞄准。
+        if (enabled) smooth_entities(entities, cfg.smoothMs);
         // 在游戏线程内完成 3D→屏幕投影（同一帧相机/位置），box 与画面同步
         int w = 0, h = 0;
         if (g_gameHwnd) {
@@ -1972,16 +2126,25 @@ void esp_on_swap() {
             w = rc.right; h = rc.bottom;
         }
         if (w > 0 && h > 0) {
-            project_entities(cam, entities, w, h, cfg, boxes);
-            // 弹射物轨迹预测（同一帧相机/位置/速度），生成屏幕折线
-            project_trajectories(cam, entities, w, h, cfg, trajs);
-            // 弓蓄力预判：本地玩家拉弓预测本次发射轨迹（追加到 trajs）
-            PlayerInfo lp = jvm_read_player();
-            project_bow_predict(cam, lp, entities, w, h, cfg, trajs);
-            // 其他玩家弓蓄力预判：渲染每个正在拉弓的玩家的抛物线
-            project_other_bow_predicts(cam, entities, w, h, cfg, trajs);
+            if (enabled) {
+                project_entities(cam, entities, w, h, cfg, boxes);
+                // 弹射物轨迹预测（同一帧相机/位置/速度），生成屏幕折线
+                project_trajectories(cam, entities, w, h, cfg, trajs);
+                // 弓蓄力预判：本地玩家拉弓预测本次发射轨迹（追加到 trajs）
+                PlayerInfo lp = jvm_read_player();
+                project_bow_predict(cam, lp, entities, w, h, cfg, trajs);
+                // 其他玩家弓蓄力预判：渲染每个正在拉弓的玩家的抛物线
+                project_other_bow_predicts(cam, entities, w, h, cfg, trajs);
+            }
+            if (aimCollect)
+                aimbot_update_target(cam, w, h, entities, cfg.aim);
+        } else if (aimCollect) {
+            aimbot_clear_target();
         }
+    } else if (aimCollect) {
+        aimbot_clear_target();
     }
+    if (aimActive && !aimCollect) aimbot_clear_target();
 
     {
         std::lock_guard<std::mutex> lock(g_dataMutex);
@@ -1989,8 +2152,9 @@ void esp_on_swap() {
         g_boxes.swap(boxes);
         g_trajectories.swap(trajs);
     }
-    // ESP / 菜单 / 状态栏 / 右下角 Toast 任一需要显示时，在游戏渲染线程同步绘制。
-    if ((enabled || menuOpen || toastActive || statusOn) &&
+    // ESP / 菜单 / 状态栏 / 自瞄可视化 / 右下角 Toast 任一需要显示时同步绘制。
+    const bool aimVisual = !menuOpen && aimbot_visual_wanted();
+    if ((enabled || menuOpen || toastActive || statusOn || aimVisual) &&
         g_overlayVisible.load(std::memory_order_acquire) && !cam.guiOpen)
         esp_draw_overlay(cfg);
 }
@@ -2054,6 +2218,7 @@ static void render_loop(HWND gameHwnd) {
 
         bool menuOpen = g_menuVisible.load(std::memory_order_acquire);
         clicker_set_menu_open(menuOpen);
+        aimbot_set_menu_open(menuOpen);
 
         // 菜单打开时覆盖层从鼠标穿透切换为可点击（仍不抢游戏焦点）
         if (menuOpen != overlayClickable) {
@@ -2064,11 +2229,12 @@ static void render_loop(HWND gameHwnd) {
         }
 
         // ============ 统一可见性状态管理 ============
-        // ESP / 菜单 / 状态栏 / 右下角 Toast 任一需要显示时显示覆盖层。
+        // ESP / 菜单 / 状态栏 / 自瞄可视化 / 右下角 Toast 任一需要显示时显示覆盖层。
         bool toastActive = toast_active();
         bool hudOn = status_bar_wanted();
+        bool aimVisual = aimbot_visual_wanted();
         bool wantVisible = g_espEnabled.load(std::memory_order_acquire) ||
-                           menuOpen || toastActive || hudOn;
+                           menuOpen || toastActive || hudOn || aimVisual;
 
         // 界面检测：相机/界面状态由 SwapBuffers 钩子在游戏渲染线程每帧更新。
         if (wantVisible) {
@@ -2128,11 +2294,11 @@ static void render_loop(HWND gameHwnd) {
             }
         }
 
-        // 空闲降频：ESP/菜单/状态栏/Toast 都关时宿主只需 30Hz 轮询热键与窗口状态；
-        // 菜单打开恢复 renderHz（跟手），ESP 或 HUD 显示时用 60Hz 维持可见性对齐。
+        // 空闲降频：ESP/菜单/状态栏/自瞄可视化/Toast 都关时宿主只需 30Hz；
+        // 菜单打开恢复 renderHz（跟手），ESP/HUD/自瞄显示时用 60Hz 维持对齐。
         int targetHz = menuOpen ? hostHz
                      : (g_espEnabled.load(std::memory_order_acquire) ||
-                        hudOn || toastActive)
+                        hudOn || toastActive || aimVisual)
                        ? (std::min)(60, hostHz)
                        : 30;
         int hostPeriodMs = 1000 / targetHz;
@@ -2167,6 +2333,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI esp_thread_main(LPVOID) {
     g_profileKeyAtomic.store(g_cfg.profileKey, std::memory_order_release);
     esp_cfg_publish();   // 游戏线程从此刻开始只读发布快照
     clicker_apply_settings(g_cfg.clicker);
+    aimbot_apply_settings(g_cfg.aim);
     clicker_set_settings_changed_callback(on_clicker_hotkey_changed);
     clicker_set_hotkey_toast_callback(on_clicker_hotkey_toast);
     clicker_set_running(g_cfg.clicker.enabled);
@@ -2190,6 +2357,9 @@ extern "C" __declspec(dllexport) DWORD WINAPI esp_thread_main(LPVOID) {
     // 连点线程：不接触 JVM、不 AttachCurrentThread；仅向本进程游戏窗口 PostMessage。
     clicker_start(gameHwnd);
 
+    // 自瞄线程：独立 250Hz 线程 SendInput 相对移动，不接触 JVM。
+    aimbot_start(gameHwnd);
+
     // 安装 SwapBuffers 钩子：在游戏渲染线程内复用已有 JNIEnv 采集实体数据
     // 与连点器门控状态（canAttack / canPlace），不再创建外部消息通道。
     gl_install_hook();
@@ -2198,8 +2368,9 @@ extern "C" __declspec(dllexport) DWORD WINAPI esp_thread_main(LPVOID) {
     // 不接触 JVM；绘制由游戏线程在 SwapBuffers 钩子内完成。
     render_loop(gameHwnd);
 
-    // 停止：先停连点线程，再还原 SwapBuffers 钩子（阻止游戏渲染线程继续进入本模块）
+    // 停止：先停自瞄/连点线程，再还原 SwapBuffers 钩子（阻止游戏渲染线程继续进入本模块）
     g_running = false;
+    aimbot_stop();
     clicker_stop();
     gl_remove_hook();
     esp_log("[ESP] 线程退出（保留覆盖层窗口，避免卸载期 DestroyWindow 竞态崩溃）");

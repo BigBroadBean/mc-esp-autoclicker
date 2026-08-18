@@ -77,6 +77,7 @@ static jmethodID m_getInstance, m_getFrameTime,            // Minecraft
                  m_getEyeHeight, m_getYRot, m_getXRot,      // Entity（玩家）
                  m_isUsingItem, m_getTicksUsingItem, m_getMainHandItem,  // LivingEntity
                  m_isAlive, m_isAttackable,                 // LivingEntity（连点器门控）
+                 m_getHealth, m_getMaxHealth,               // LivingEntity（自瞄目标排序）
                  m_getItem, m_getItemDesc,                  // ItemStack / Item
                  m_hitResultGetType, m_hitGetEntity,        // HitResult / EntityHitResult
                  m_clip, m_hitGetType, m_hitGetLocation,     // Level / HitResult
@@ -471,6 +472,14 @@ bool jvm_resolve_all() {
     {
         static const char* n[] = {"m_6097_", "isAttackable"};
         m_isAttackable = resolve_method(c_LivingEntity, "LivingEntity.isAttackable", n, 2, "()Z", false);
+    }
+    {
+        static const char* n[] = {"m_21223_", "getHealth"};
+        m_getHealth = resolve_method(c_LivingEntity, "LivingEntity.getHealth", n, 2, "()F", false);
+    }
+    {
+        static const char* n[] = {"m_21233_", "getMaxHealth"};
+        m_getMaxHealth = resolve_method(c_LivingEntity, "LivingEntity.getMaxHealth", n, 2, "()F", false);
     }
 
     // ---- ClientLevel ----
@@ -1019,6 +1028,7 @@ bool jvm_clip_block(double x0, double y0, double z0,
 // 采集实体
 // ------------------------------------------------------------
 int jvm_collect_entities(double camX, double camY, double camZ, float partialTick,
+                         bool needAimData, bool needAimVelocity,
                          std::vector<EntityData>& out) {
     if (!g_env) return 0;
     if (!f_x || !f_y || !f_z || !f_xo || !f_yo || !f_zo) return 0;
@@ -1151,6 +1161,7 @@ int jvm_collect_entities(double camX, double camY, double camZ, float partialTic
                     d.vx = g_env->GetDoubleField(mv, f_vx);
                     d.vy = g_env->GetDoubleField(mv, f_vy);
                     d.vz = g_env->GetDoubleField(mv, f_vz);
+                    d.hasVelocity = true;
                     if (g_env->ExceptionCheck()) g_env->ExceptionClear();
                     g_env->DeleteLocalRef(mv);
                 }
@@ -1162,6 +1173,36 @@ int jvm_collect_entities(double camX, double camY, double camZ, float partialTic
                     d.ownProjectile = g_env->IsSameObject(owner, self);
                     g_env->DeleteLocalRef(owner);
                 }
+            }
+        }
+
+        // 自瞄数据：仅 needAimData 且为生物时读取生命值；
+        // needAimVelocity 时才读速度（预判用）。
+        if (needAimData && d.isLiving) {
+            if (needAimVelocity && m_getDeltaMovement) {
+                jobject mv = g_env->CallObjectMethod(ent, m_getDeltaMovement);
+                if (g_env->ExceptionCheck()) g_env->ExceptionClear();
+                if (mv) {
+                    d.vx = g_env->GetDoubleField(mv, f_vx);
+                    d.vy = g_env->GetDoubleField(mv, f_vy);
+                    d.vz = g_env->GetDoubleField(mv, f_vz);
+                    d.hasVelocity = true;
+                    if (g_env->ExceptionCheck()) g_env->ExceptionClear();
+                    g_env->DeleteLocalRef(mv);
+                }
+            }
+            if (m_getHealth && m_getMaxHealth) {
+                d.health = g_env->CallFloatMethod(ent, m_getHealth);
+                if (g_env->ExceptionCheck()) g_env->ExceptionClear();
+                d.maxHealth = g_env->CallFloatMethod(ent, m_getMaxHealth);
+                if (g_env->ExceptionCheck()) g_env->ExceptionClear();
+                d.healthValid = (d.maxHealth > 0.0f);
+            } else if (m_isAlive) {
+                const bool alive = g_env->CallBooleanMethod(ent, m_isAlive) == JNI_TRUE;
+                if (g_env->ExceptionCheck()) g_env->ExceptionClear();
+                d.health = alive ? 1.0f : 0.0f;
+                d.maxHealth = 1.0f;
+                d.healthValid = true;
             }
         }
 

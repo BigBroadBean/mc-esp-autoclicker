@@ -12,7 +12,7 @@ if not exist loader (
 )
 
 echo === [1/4] build embedded payload DLL (build_tmp\mc_esp.dll) ===
-"%GCC%" -shared -O2 -std=c++17 -static-libgcc -static-libstdc++ -s -Iinclude -Iinclude\win32 -o build_tmp\mc_esp.dll src\common.cpp src\clicker.cpp src\dllmain.cpp src\esp.cpp src\glrender.cpp src\jvm.cpp src\overlay.cpp -luser32 -lgdi32 -lwinmm
+"%GCC%" -shared -O2 -std=c++17 -static-libgcc -static-libstdc++ -s -Iinclude -Iinclude\win32 -o build_tmp\mc_esp.dll src\common.cpp src\clicker.cpp src\aimbot.cpp src\dllmain.cpp src\esp.cpp src\glrender.cpp src\jvm.cpp src\overlay.cpp -luser32 -lgdi32 -lwinmm
 if errorlevel 1 goto :err
 
 echo === [2/4] build bin2h.exe ===

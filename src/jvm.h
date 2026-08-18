@@ -71,7 +71,12 @@ struct EntityData {
     // 弹射物轨迹（仅 projType != PROJ_NONE 时有效）
     int     projType = PROJ_NONE;   // 弹射物类型
     double  vx = 0, vy = 0, vz = 0; // 当前速度（blocks/tick，来自 getDeltaMovement）
+    bool    hasVelocity = false;    // 速度字段是否有效（自瞄预判使用）
     bool    ownProjectile = false;  // 是否本地玩家发射的弹射物（不渲染轨迹，由弓预判覆盖）
+    // 自瞄目标选择（仅 needAimData 时读取，避免每帧对全部实体做额外 JNI）
+    float   health = 0.0f;          // 当前生命值
+    float   maxHealth = 1.0f;       // 最大生命值
+    bool    healthValid = false;    // 是否成功读到生命值
 };
 
 // 游戏线程（SwapBuffers 钩子）内预投影好的屏幕坐标实体——渲染线程只画、不投影。
@@ -135,6 +140,9 @@ bool jvm_clip_block(double x0, double y0, double z0,
                     double& hx, double& hy, double& hz, bool& outHit);
 
 // 采集 level 中的所有实体（按 config 过滤）。返回收集到的数量。
+// needAimData=true 时额外读取生物生命值（跳过死亡目标 / 血量排序）；
+// needAimVelocity=true 时再读取生物速度（自瞄预判）。
 // 需先调用 jvm_attach / jvm_resolve_all。
 int jvm_collect_entities(double camX, double camY, double camZ, float partialTick,
+                         bool needAimData, bool needAimVelocity,
                          std::vector<EntityData>& out);
