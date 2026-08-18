@@ -89,6 +89,7 @@ struct ScreenBox {
     bool  hasTracer = false;
     float minX = 0, minY = 0, maxX = 0, maxY = 0;   // 2D 极值（填充/名字定位）
     bool  hasFill = false;            // filledBox
+    bool  has2d   = false;            // box2d（屏幕矩形外框）
 };
 
 // 弹射物轨迹屏幕折线（游戏线程预投影，渲染线程直接画）

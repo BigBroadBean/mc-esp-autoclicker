@@ -16,6 +16,7 @@
 
 #include <thread>
 #include <chrono>
+#include <memory>
 #include <mutex>
 #include <atomic>
 #include <unordered_map>
@@ -33,6 +34,22 @@ static std::atomic<bool> g_menuVisible{false};
 static std::atomic<int>  g_menuCursor{0};
 static std::atomic<int>  g_activeProfileAtomic{0};   // 供游戏线程无锁读取
 static std::atomic<int>  g_espKeyAtomic{0};           // 供游戏线程无锁读取
+static std::atomic<int>  g_profileKeyAtomic{VK_F8};   // 供游戏线程无锁读取
+
+// ---- ESP 配置快照（渲染线程写，游戏线程只读）----
+// 菜单新增 ESP 设置页后，g_cfg 的 ESP 字段会被渲染线程修改；
+// 游戏线程（SwapBuffers 钩子）不再直接读 g_cfg，而是 atomic_load 本快照，
+// 避免 bool/int 字段在 64 位字对齐外的数据竞争。
+static std::shared_ptr<const EspConfig> g_espCfgSnapshot;
+
+static void esp_cfg_publish() {
+    std::shared_ptr<const EspConfig> p = std::make_shared<EspConfig>(g_cfg);
+    std::atomic_store(&g_espCfgSnapshot, p);
+}
+
+static std::shared_ptr<const EspConfig> esp_cfg_get() {
+    return std::atomic_load(&g_espCfgSnapshot);
+}
 
 // ---- 右下角悬浮提示（单条，最新覆盖）----
 static std::mutex        g_toastMutex;
@@ -61,9 +78,7 @@ static std::atomic<bool> g_stop{false};
 
 // ---- 共享数据（SwapBuffers 钩子在游戏渲染线程写，渲染线程读） ----
 static std::mutex               g_dataMutex;
-static uint64_t                 g_dataSeq = 0;   // 每发布一帧实体快照 +1（渲染线程去重）
 static CamData                  g_cam;
-static std::vector<EntityData>  g_entities;
 // 游戏线程预投影好的屏幕坐标实体（本线程直接绘制，与游戏画面同帧同步）
 static std::vector<ScreenBox>   g_boxes;
 // 弹射物预测轨迹屏幕折线（游戏线程预投影，渲染线程直接画）
@@ -143,23 +158,24 @@ static HWND find_game_window() {
 // 覆盖层重绘紧随游戏帧（事件同步），两者同帧对齐，外推反而会在实体加减速时
 // 预测不准造成瞬移/拖影。
 static void project_entities(const CamData& cam, const std::vector<EntityData>& ents,
-                             int w, int h, std::vector<ScreenBox>& out) {
+                             int w, int h, const EspConfig& cfg,
+                             std::vector<ScreenBox>& out) {
     out.clear();
     float fov = cam.fov;
-    if (fov <= 1.f) fov = 70.f;
+    if (fov <= 1.f) fov = (float)cfg.fov;   // fov 配置作为运行时 FOV 失效时的兜底值
     CamBasis cb;
     if (!cam_basis(cam.yaw, cam.pitch, fov, w, h, cb)) return;
 
     out.reserve(ents.size());
     for (const auto& e : ents) {
-        if (e.dist > g_cfg.maxDistance) continue;
-        if (!g_cfg.showPlayers && e.isPlayer) continue;
-        if (!g_cfg.showMobs && e.isLiving && !e.isPlayer) continue;
-        if (!g_cfg.showOthers && !e.isLiving && !e.isPlayer) continue;
+        if (e.dist > cfg.maxDistance) continue;
+        if (!cfg.showPlayers && e.isPlayer) continue;
+        if (!cfg.showMobs && e.isLiving && !e.isPlayer) continue;
+        if (!cfg.showOthers && !e.isLiving && !e.isPlayer) continue;
 
         ScreenBox b;
-        b.color = e.isPlayer ? g_cfg.colPlayer :
-                  (e.isLiving ? g_cfg.colMob : g_cfg.colOther);
+        b.color = e.isPlayer ? cfg.colPlayer :
+                  (e.isLiving ? cfg.colMob : cfg.colOther);
 
         float hw = (float)e.bbw * 0.5f;
         float hh = (float)e.bbh;
@@ -209,11 +225,12 @@ static void project_entities(const CamData& cam, const std::vector<EntityData>& 
                     maxX = std::max(maxX, sx[j]); maxY = std::max(maxY, sy[j]);
                 }
         b.minX = minX; b.minY = minY; b.maxX = maxX; b.maxY = maxY;
-        b.hasFill = g_cfg.filledBox;
+        b.hasFill = cfg.filledBox;
+        b.has2d   = cfg.box2d;   // 2D 屏幕矩形外框（此前配置存在但未实现）
         float cx = (minX + maxX) * 0.5f;
 
         // 3D 盒 12 条边：逐边近平面裁剪，生成屏幕线段（渲染线程直接画）
-        if (g_cfg.box3d) {
+        if (cfg.box3d) {
             static const int edges[12][2] = {
                 {0,1},{1,2},{2,3},{3,0}, {4,5},{5,6},{6,7},{7,4},
                 {0,4},{1,5},{2,6},{3,7}
@@ -243,13 +260,13 @@ static void project_entities(const CamData& cam, const std::vector<EntityData>& 
         }
 
         // 名字
-        if (g_cfg.nameTags && !e.name.empty()) {
+        if (cfg.nameTags && !e.name.empty()) {
             b.name = e.name;
             b.nameX = cx;
             b.nameY = minY - 18.f;
         }
         // tracer（屏幕底部到实体中腰）
-        if (g_cfg.tracer) {
+        if (cfg.tracer) {
             float tx, ty;
             if (cam_project(cb, cam.px, cam.py, cam.pz, x, y + hh * 0.5, z, tx, ty)) {
                 b.tx = tx; b.ty = ty;
@@ -427,16 +444,17 @@ static bool seg_aabb(double p0x, double p0y, double p0z,
 //   雪球/末影珍珠 : drag=0.99, gravity=0.03
 static void project_trajectories(const CamData& cam,
                                  const std::vector<EntityData>& ents,
-                                 int w, int h, std::vector<TrajectoryData>& out) {
+                                 int w, int h, const EspConfig& cfg,
+                                 std::vector<TrajectoryData>& out) {
     out.clear();
-    if (!g_cfg.showTrajectory) return;
+    if (!cfg.showTrajectory) return;
     CamBasis cb;
-    if (!cam_basis(cam.yaw, cam.pitch, cam.fov, w, h, cb)) return;
+    if (!cam_basis(cam.yaw, cam.pitch, cam.fov > 1.f ? cam.fov : (float)cfg.fov, w, h, cb)) return;
 
     for (const auto& e : ents) {
         if (e.projType == PROJ_NONE) continue;
         if (e.ownProjectile) continue;   // 本地玩家射出的弹射物：轨迹由弓蓄力预判覆盖
-        if (e.dist > g_cfg.maxDistance) continue;
+        if (e.dist > cfg.maxDistance) continue;
         double drag = 0.99, grav;
         switch (e.projType) {
             case PROJ_ARROW: grav = 0.05; break;
@@ -446,7 +464,7 @@ static void project_trajectories(const CamData& cam,
         // 静止弹射物（落地/停住）不画轨迹
         if (vx * vx + vy * vy + vz * vz < 1e-6) continue;
 
-        int ticks = g_cfg.trajectoryTicks;
+        int ticks = cfg.trajectoryTicks;
         if (ticks < 5) ticks = 5;
         if (ticks > 63) ticks = 63;
 
@@ -462,7 +480,7 @@ static void project_trajectories(const CamData& cam,
         }
 
         TrajectoryData td;
-        td.color = g_cfg.colTraj;
+        td.color = cfg.colTraj;
         build_traj_segments(cb, pts, ticks + 1, td);
         if (td.segCount > 0) out.push_back(std::move(td));
     }
@@ -473,13 +491,14 @@ static void project_trajectories(const CamData& cam,
 // 其他玩家用其自身 yaw/pitch）。落点沿轨迹对生物/玩家做 AABB 命中——命中则
 // 落点方块为红，否则为蓝（方块落点）。
 static void project_bow_shot(const CamData& cam, const std::vector<EntityData>& ents,
-                             int w, int h, std::vector<TrajectoryData>& out,
+                             int w, int h, const EspConfig& cfg,
+                             std::vector<TrajectoryData>& out,
                              double sx, double sy, double sz,
                              double yaw, double pitch, float power, double groundY,
                              double shooterVX, double shooterVY, double shooterVZ,
                              bool shooterOnGround,
                              uint32_t lineColor, int shooterId) {
-    if (!g_cfg.showTrajectory) return;
+    if (!cfg.showTrajectory) return;
     // 弓蓄力 power：ticks/20 -> (p^2 + 2p)/3，封顶 1（与 ArrowItem 拉弓加成一致）
     power = (power * power + power * 2.0f) / 3.0f;
     if (power > 1.0f) power = 1.0f;
@@ -487,7 +506,7 @@ static void project_bow_shot(const CamData& cam, const std::vector<EntityData>& 
     double speed = 3.0 * power;
 
     CamBasis cb;
-    if (!cam_basis(cam.yaw, cam.pitch, cam.fov, w, h, cb)) return;
+    if (!cam_basis(cam.yaw, cam.pitch, cam.fov > 1.f ? cam.fov : (float)cfg.fov, w, h, cb)) return;
 
     // 方向 = 射手视线（本地玩家第一人称=相机；其他玩家用其自身朝向）
     double fx = mc_forward_x(yaw, pitch);
@@ -580,7 +599,7 @@ static void project_bow_shot(const CamData& cam, const std::vector<EntityData>& 
         if (camspace_to_screen(cb, pts[pc - 1].cX, pts[pc - 1].cY, pts[pc - 1].cZ, lx, ly)) {
             td.hasLanding = true;
             td.lx = lx; td.ly = ly;
-            td.landColor = entityHit ? g_cfg.colLandHit : g_cfg.colLand;
+            td.landColor = entityHit ? cfg.colLandHit : cfg.colLand;
             // 落点 3D 立方体：半边长 0.3（比 0.5 缩小 40%），中心抬高 0.35。
             // 6 个面渲染半透明平面（50%），详见 esp_draw_overlay。
             project_landing_cube(cb, cam, lx0, ly0 + 0.35, lz0, 0.3, td);
@@ -592,33 +611,35 @@ static void project_bow_shot(const CamData& cam, const std::vector<EntityData>& 
 // ---- 本地玩家弓蓄力预判（第一人称：相机朝向即本地玩家朝向） ----
 static void project_bow_predict(const CamData& cam, const PlayerInfo& lp,
                                 const std::vector<EntityData>& ents,
-                                int w, int h, std::vector<TrajectoryData>& out) {
+                                int w, int h, const EspConfig& cfg,
+                                std::vector<TrajectoryData>& out) {
     if (!lp.ok || !lp.chargingBow) return;
     // AbstractArrow 出生点 = (shooter.x, shooter.eyeY - 0.1, shooter.z)
-    project_bow_shot(cam, ents, w, h, out,
+    project_bow_shot(cam, ents, w, h, cfg, out,
                      lp.px, lp.py + lp.eyeHeight - 0.1, lp.pz,
                      cam.yaw, cam.pitch,
                      (float)lp.useTicks / 20.0f, lp.py,
                      lp.vx, lp.vy, lp.vz, lp.onGround,
-                     g_cfg.colTraj, -1);
+                     cfg.colTraj, -1);
 }
 
 // ---- 其他玩家弓蓄力预判（渲染每个正在拉弓的玩家的抛物线） ----
 static void project_other_bow_predicts(const CamData& cam,
                                        const std::vector<EntityData>& ents,
-                                       int w, int h, std::vector<TrajectoryData>& out) {
-    if (!g_cfg.showTrajectory) return;
+                                       int w, int h, const EspConfig& cfg,
+                                       std::vector<TrajectoryData>& out) {
+    if (!cfg.showTrajectory) return;
     for (const auto& e : ents) {
         if (!e.isPlayer || !e.chargingBow) continue;
-        if (e.dist > g_cfg.maxDistance) continue;
+        if (e.dist > cfg.maxDistance) continue;
         // 其他玩家眼睛高度用默认 1.62；出生点按 AbstractArrow 为 eyeY - 0.1；
         // groundY 用其脚底高度；线用红色（colTrajOther）区分本地玩家。
-        project_bow_shot(cam, ents, w, h, out,
+        project_bow_shot(cam, ents, w, h, cfg, out,
                          e.ix, e.iy + 1.62 - 0.1, e.iz,
                          e.yaw, e.pitch,
                          (float)e.useTicks / 20.0f, e.iy,
                          e.vx, e.vy, e.vz, e.onGround,
-                         g_cfg.colTrajOther, e.id);
+                         cfg.colTrajOther, e.id);
     }
 }
 
@@ -634,13 +655,14 @@ static void project_other_bow_predicts(const CamData& cam,
 //
 //   分页原则：子功能归入其服务的父功能。
 //     连点页：总开关 / 左右键及其 CPS、预设 / 保持模式 / 连点热键
-//     门控页：攻击门控及其热键 / 放置门控及其热键 / 光标门控
+//     门控页：攻击门控及其热键 / 放置门控及其热键 / 光标门控 / 游戏内门控
 //     高级页：随机 CPS / 拟人化 / CPS 上限 / 定时停止
-//     系统页：ESP / 配置方案
+//     ESP 页：开关 / 过滤 / 盒子 / 名字 / 射线 / 距离 / 轨迹
+//     系统页：配置方案 / 方案热键
 // ============================================================
 
-enum MenuPage { PAGE_CLICK = 0, PAGE_GATE, PAGE_ADV, PAGE_SYS, PAGE_COUNT };
-static const wchar_t* kPageNames[PAGE_COUNT] = { L"连点", L"门控", L"高级", L"系统" };
+enum MenuPage { PAGE_CLICK = 0, PAGE_GATE, PAGE_ADV, PAGE_ESP, PAGE_SYS, PAGE_COUNT };
+static const wchar_t* kPageNames[PAGE_COUNT] = { L"连点", L"门控", L"高级", L"ESP", L"系统" };
 
 enum MenuItem {
     MI_CLICKER = 0,
@@ -649,34 +671,50 @@ enum MenuItem {
     MI_KEEP, MI_HOTKEY,
     MI_ATTACK_GATE, MI_ATTACK_KEY,
     MI_PLACE_GATE, MI_PLACE_KEY,
-    MI_CURSOR_GATE,
+    MI_CURSOR_GATE, MI_INGAME_GATE,
     MI_RANDOM, MI_RANDOM_RANGE,
     MI_HUMAN_MODE, MI_HUMAN_LEVEL,
     MI_CPS_MAX,
     MI_AUTOSTOP, MI_AUTOSTOP_SEC,
-    MI_ESP, MI_ESP_KEY, MI_PROFILE,
+    MI_ESP, MI_ESP_KEY,
+    MI_ESP_PLAYERS, MI_ESP_MOBS, MI_ESP_OTHERS,
+    MI_ESP_BOX3D, MI_ESP_BOX2D, MI_ESP_FILL,
+    MI_ESP_NAME, MI_ESP_TRACER,
+    MI_ESP_LINE, MI_ESP_DIST,
+    MI_ESP_TRAJ, MI_ESP_TRAJ_TICKS,
+    MI_PROFILE, MI_PROFILE_KEY,
     MI_COUNT
 };
 
-static constexpr int kMenuMaxRows = 9;
+static constexpr int kMenuMaxRows = 14;
 static const int kPageClickItems[kMenuMaxRows] = {
     MI_CLICKER, MI_LEFT, MI_LEFT_CPS, MI_LEFT_PRESET,
     MI_RIGHT, MI_RIGHT_CPS, MI_RIGHT_PRESET,
-    MI_KEEP, MI_HOTKEY
+    MI_KEEP, MI_HOTKEY, -1, -1, -1, -1, -1
 };
 static const int kPageGateItems[kMenuMaxRows] = {
-    MI_ATTACK_GATE, MI_ATTACK_KEY, MI_PLACE_GATE, MI_PLACE_KEY, MI_CURSOR_GATE,
-    -1, -1, -1, -1
+    MI_ATTACK_GATE, MI_ATTACK_KEY, MI_PLACE_GATE, MI_PLACE_KEY,
+    MI_CURSOR_GATE, MI_INGAME_GATE, -1, -1, -1, -1, -1, -1, -1, -1
 };
 static const int kPageAdvItems[kMenuMaxRows] = {
     MI_RANDOM, MI_RANDOM_RANGE, MI_HUMAN_MODE, MI_HUMAN_LEVEL,
-    MI_CPS_MAX, MI_AUTOSTOP, MI_AUTOSTOP_SEC, -1, -1
+    MI_CPS_MAX, MI_AUTOSTOP, MI_AUTOSTOP_SEC, -1, -1, -1, -1, -1, -1, -1
 };
-static const int kPageSysItems[kMenuMaxRows] = { MI_ESP, MI_ESP_KEY, MI_PROFILE, -1, -1, -1, -1, -1, -1 };
+static const int kPageEspItems[kMenuMaxRows] = {
+    MI_ESP, MI_ESP_KEY,
+    MI_ESP_PLAYERS, MI_ESP_MOBS, MI_ESP_OTHERS,
+    MI_ESP_BOX3D, MI_ESP_BOX2D, MI_ESP_FILL,
+    MI_ESP_NAME, MI_ESP_TRACER,
+    MI_ESP_LINE, MI_ESP_DIST,
+    MI_ESP_TRAJ, MI_ESP_TRAJ_TICKS
+};
+static const int kPageSysItems[kMenuMaxRows] = {
+    MI_PROFILE, MI_PROFILE_KEY, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1
+};
 static const int* kPageItems[PAGE_COUNT] = {
-    kPageClickItems, kPageGateItems, kPageAdvItems, kPageSysItems
+    kPageClickItems, kPageGateItems, kPageAdvItems, kPageEspItems, kPageSysItems
 };
-static const int kPageRowCount[PAGE_COUNT] = { 9, 5, 7, 3 };
+static const int kPageRowCount[PAGE_COUNT] = { 9, 6, 7, 14, 2 };
 
 struct MenuItemDef { const wchar_t* label; const wchar_t* tip; };
 static const MenuItemDef kMenuItemDefs[MI_COUNT] = {
@@ -694,6 +732,7 @@ static const MenuItemDef kMenuItemDefs[MI_COUNT] = {
     { L"仅持方块时右键", L"开启后仅当主手持有方块类物品（BlockItem）时，右键才连点。" },
     { L"放置门控热键", L"快速开关“仅持方块时右键”的快捷键。" },
     { L"光标门控",     L"开启后系统光标可见（背包/聊天/菜单）时自动暂停左右键连点。" },
+    { L"游戏内门控",   L"开启后仅当已进入世界（player 存在）时连点；主菜单/加载界面自动暂停。" },
     { L"随机 CPS",     L"在基础 CPS 上叠加 ±N 的随机波动，模拟真人点击。" },
     { L"随机范围",     L"随机 CPS 的波动幅度：±1 到 ±5 CPS。" },
     { L"拟人化节奏",   L"均匀 / 双击连招 / 呼吸波动 / 疲劳递减 四种点击节奏。" },
@@ -703,7 +742,20 @@ static const MenuItemDef kMenuItemDefs[MI_COUNT] = {
     { L"停止秒数",     L"定时自动停止的秒数，1..3600。" },
     { L"ESP",          L"开关 ESP 绘制：盒子 / 名字 / 轨迹等。默认关闭。" },
     { L"ESP 快捷键",   L"直接开关 ESP 的热键，按 Enter 后按任意键绑定。" },
+    { L"显示玩家",     L"是否绘制玩家实体。" },
+    { L"显示生物",     L"是否绘制怪物/动物等生物实体。" },
+    { L"显示其他",     L"是否绘制掉落物、弹射物等非生物实体。" },
+    { L"3D 盒子",      L"穿墙 3D 立体包围盒，贴合实体碰撞箱。" },
+    { L"2D 矩形框",    L"屏幕 2D 矩形外框（此前配置存在但未实现，现已生效）。" },
+    { L"半透明填充",   L"在 2D 极值范围内填充半透明颜色。" },
+    { L"名字标签",     L"在盒子上方显示玩家名/实体类型名。" },
+    { L"射线",         L"从屏幕底部中心向实体中腰画一条线。" },
+    { L"线宽",         L"盒子/轨迹线条宽度：1..5。" },
+    { L"最大距离",     L"只绘制此距离内的实体，10..500 格。" },
+    { L"弹射物轨迹",   L"预测箭/雪球/末影珍珠飞行轨迹与弓蓄力抛物线。" },
+    { L"轨迹 tick",    L"弹射物轨迹预测长度，5..63 tick（20 tick = 1 秒）。" },
     { L"配置方案",     L"切换整套连点参数方案，4 套方案独立保存。" },
+    { L"方案热键",     L"游戏内按此键循环切换 4 套连点方案；Enter 后按任意键绑定。" },
 };
 
 static const wchar_t* kHumanNames[4] = { L"均匀", L"双击连招", L"呼吸波动", L"疲劳递减" };
@@ -771,7 +823,8 @@ static int menu_item_for_row(int row) {
 
 static bool menu_is_slider(int item) {
     return item == MI_LEFT_CPS || item == MI_RIGHT_CPS || item == MI_RANDOM_RANGE ||
-           item == MI_HUMAN_LEVEL || item == MI_CPS_MAX || item == MI_AUTOSTOP_SEC;
+           item == MI_HUMAN_LEVEL || item == MI_CPS_MAX || item == MI_AUTOSTOP_SEC ||
+           item == MI_ESP_LINE || item == MI_ESP_DIST || item == MI_ESP_TRAJ_TICKS;
 }
 
 static void menu_slider_rect_local(int panelW, int row, int& x0, int& x1) {
@@ -781,22 +834,29 @@ static void menu_slider_rect_local(int panelW, int row, int& x0, int& x1) {
     if (x1 < x0 + 20) x1 = x0 + 20;
 }
 
-static float menu_slider_norm(int item, const ClickerSettings& cl) {
+static float clamp01(float v) { return v < 0.f ? 0.f : (v > 1.f ? 1.f : v); }
+
+static float menu_slider_norm(int item, const EspConfig& cfg) {
+    const ClickerSettings& cl = cfg.clicker;
     switch (item) {
-    case MI_LEFT_CPS: { int max10 = cl.cpsMax * 10; return (float)(cl.cpsLeft10 - 5) / (float)(max10 - 5); }
-    case MI_RIGHT_CPS: { int max10 = cl.cpsMax * 10; return (float)(cl.cpsRight10 - 5) / (float)(max10 - 5); }
-    case MI_RANDOM_RANGE: return (float)(cl.randomRange - 1) / 4.0f;
-    case MI_HUMAN_LEVEL:  return (float)(cl.humanizeLevel - 1) / 4.0f;
-    case MI_CPS_MAX:      return (float)(cl.cpsMax - 20) / 480.0f;
-    case MI_AUTOSTOP_SEC: return (float)((std::log((double)cl.autoStopSeconds) - std::log(1.0)) /
-                                          (std::log(3600.0) - std::log(1.0)));
+    case MI_LEFT_CPS: { int max10 = cl.cpsMax * 10; return clamp01((float)(cl.cpsLeft10 - 5) / (float)(max10 - 5)); }
+    case MI_RIGHT_CPS: { int max10 = cl.cpsMax * 10; return clamp01((float)(cl.cpsRight10 - 5) / (float)(max10 - 5)); }
+    case MI_RANDOM_RANGE: return clamp01((float)(cl.randomRange - 1) / 4.0f);
+    case MI_HUMAN_LEVEL:  return clamp01((float)(cl.humanizeLevel - 1) / 4.0f);
+    case MI_CPS_MAX:      return clamp01((float)(cl.cpsMax - 20) / 480.0f);
+    case MI_AUTOSTOP_SEC: return clamp01((float)((std::log((double)cl.autoStopSeconds) - std::log(1.0)) /
+                                                (std::log(3600.0) - std::log(1.0))));
+    case MI_ESP_LINE:     return clamp01((float)(cfg.lineWidth - 1) / 4.0f);
+    case MI_ESP_DIST:     { float d = (float)cfg.maxDistance; if (d < 10.f) d = 10.f; if (d > 500.f) d = 500.f; return (d - 10.f) / 490.f; }
+    case MI_ESP_TRAJ_TICKS: return clamp01((float)(cfg.trajectoryTicks - 5) / 58.0f);
     default: return 0.0f;
     }
 }
 
-static void menu_slider_apply(int item, float t, ClickerSettings& cl) {
+static void menu_slider_apply(int item, float t, EspConfig& cfg) {
     if (t < 0.0f) t = 0.0f;
     if (t > 1.0f) t = 1.0f;
+    ClickerSettings& cl = cfg.clicker;
     switch (item) {
     case MI_LEFT_CPS: { int max10 = cl.cpsMax * 10; cl.cpsLeft10 = 5 + (int)(t * (max10 - 5) + 0.5f); if (cl.cpsLeft10 > max10) cl.cpsLeft10 = max10; break; }
     case MI_RIGHT_CPS: { int max10 = cl.cpsMax * 10; cl.cpsRight10 = 5 + (int)(t * (max10 - 5) + 0.5f); if (cl.cpsRight10 > max10) cl.cpsRight10 = max10; break; }
@@ -804,17 +864,20 @@ static void menu_slider_apply(int item, float t, ClickerSettings& cl) {
     case MI_HUMAN_LEVEL: cl.humanizeLevel = 1 + (int)(t * 4.0f + 0.5f); break;
     case MI_CPS_MAX: { int v = 20 + (int)(t * 480.0f + 0.5f); if (v > 500) v = 500; cl.cpsMax = v; int max10 = v * 10; if (cl.cpsLeft10 > max10) cl.cpsLeft10 = max10; if (cl.cpsRight10 > max10) cl.cpsRight10 = max10; break; }
     case MI_AUTOSTOP_SEC: cl.autoStopSeconds = (int)(std::exp(std::log(1.0) + t * (std::log(3600.0) - std::log(1.0))) + 0.5); if (cl.autoStopSeconds < 1) cl.autoStopSeconds = 1; if (cl.autoStopSeconds > 3600) cl.autoStopSeconds = 3600; break;
+    case MI_ESP_LINE: { int v = 1 + (int)(t * 4.0f + 0.5f); if (v < 1) v = 1; if (v > 5) v = 5; cfg.lineWidth = v; break; }
+    case MI_ESP_DIST: { int v = 10 + (int)(t * 490.0f + 0.5f); if (v < 10) v = 10; if (v > 500) v = 500; cfg.maxDistance = v; break; }
+    case MI_ESP_TRAJ_TICKS: { int v = 5 + (int)(t * 58.0f + 0.5f); if (v < 5) v = 5; if (v > 63) v = 63; cfg.trajectoryTicks = v; break; }
     default: break;
     }
 }
 
-static void commit_clicker_config() {
+static void commit_config() {
     g_cfg.profiles[g_cfg.activeProfile] = g_cfg.clicker;
     clicker_apply_settings(g_cfg.clicker);
+    esp_cfg_publish();
     config_save(g_cfg);
     g_menuDirty.store(true, std::memory_order_release);
 }
-
 // 连点线程热键开关后的右下角悬浮提示
 static void on_clicker_hotkey_toast(int kind, bool on) {
     switch (kind) {
@@ -831,6 +894,7 @@ static void on_clicker_hotkey_changed() {
     g_cfg.clicker = cs.settings;
     g_cfg.clicker.enabled = cs.running;   // 热键/自动停止后的连点开关也本地保存
     g_cfg.profiles[g_cfg.activeProfile] = g_cfg.clicker;
+    esp_cfg_publish();
     config_save(g_cfg);
     g_menuDirty.store(true, std::memory_order_release);
 }
@@ -858,27 +922,30 @@ static void menu_move(int dir) {
     g_menuDirty.store(true, std::memory_order_release);
 }
 
+static void menu_switch_profile(int dir) {
+    g_cfg.profiles[g_cfg.activeProfile] = g_cfg.clicker;
+    int next = g_cfg.activeProfile + dir;
+    if (next < 0) next = EspConfig::kClickerProfiles - 1;
+    if (next >= EspConfig::kClickerProfiles) next = 0;
+    g_cfg.activeProfile = next;
+    g_cfg.clicker = g_cfg.profiles[next];
+    g_activeProfileAtomic.store(next, std::memory_order_release);
+}
+
 static void menu_adjust(int item, int dir, bool fast) {
-    ClickerSettings& cl = g_cfg.clicker;
+    EspConfig& cfg = g_cfg;
+    ClickerSettings& cl = cfg.clicker;
     switch (item) {
     case MI_CLICKER: clicker_toggle_running(); cl.enabled = clicker_snapshot().running; break;
-    case MI_ESP: { bool next = !g_espEnabled.load(std::memory_order_acquire); g_espEnabled.store(next, std::memory_order_release); g_cfg.enabled = next; break; }
-    case MI_PROFILE: {
-        g_cfg.profiles[g_cfg.activeProfile] = g_cfg.clicker;
-        int next = g_cfg.activeProfile + dir;
-        if (next < 0) next = EspConfig::kClickerProfiles - 1;
-        if (next >= EspConfig::kClickerProfiles) next = 0;
-        g_cfg.activeProfile = next;
-        g_cfg.clicker = g_cfg.profiles[next];
-        g_activeProfileAtomic.store(next, std::memory_order_release);
-        break;
-    }
+    case MI_ESP: { bool next = !g_espEnabled.load(std::memory_order_acquire); g_espEnabled.store(next, std::memory_order_release); cfg.enabled = next; break; }
+    case MI_PROFILE: menu_switch_profile(dir); break;
     case MI_LEFT: cl.leftEnabled = !cl.leftEnabled; break;
     case MI_RIGHT: cl.rightEnabled = !cl.rightEnabled; break;
     case MI_KEEP: cl.keep = !cl.keep; break;
     case MI_ATTACK_GATE: cl.attackGate = !cl.attackGate; break;
     case MI_PLACE_GATE: cl.placeGate = !cl.placeGate; break;
     case MI_CURSOR_GATE: cl.cursorGate = !cl.cursorGate; break;
+    case MI_INGAME_GATE: cl.inGameGate = !cl.inGameGate; break;
     case MI_RANDOM: cl.randomEnabled = !cl.randomEnabled; break;
     case MI_AUTOSTOP: cl.autoStopEnabled = !cl.autoStopEnabled; break;
 
@@ -905,11 +972,25 @@ static void menu_adjust(int item, int dir, bool fast) {
     case MI_HUMAN_LEVEL: cl.humanizeLevel += dir; if (cl.humanizeLevel < 1) cl.humanizeLevel = 1; if (cl.humanizeLevel > 5) cl.humanizeLevel = 5; break;
     case MI_CPS_MAX: { int step = fast ? 10 : 1; int v = cl.cpsMax + dir * step; if (v < 20) v = 20; if (v > 500) v = 500; cl.cpsMax = v; int max10 = v * 10; if (cl.cpsLeft10 > max10) cl.cpsLeft10 = max10; if (cl.cpsRight10 > max10) cl.cpsRight10 = max10; break; }
     case MI_AUTOSTOP_SEC: { int step = fast ? 10 : 1; int v = cl.autoStopSeconds + dir * step; if (v < 1) v = 1; if (v > 3600) v = 3600; cl.autoStopSeconds = v; break; }
+
+    // ---- ESP 设置页（原先只能改 esp.ini，现在菜单实时生效并写回） ----
+    case MI_ESP_PLAYERS: cfg.showPlayers = !cfg.showPlayers; break;
+    case MI_ESP_MOBS: cfg.showMobs = !cfg.showMobs; break;
+    case MI_ESP_OTHERS: cfg.showOthers = !cfg.showOthers; break;
+    case MI_ESP_BOX3D: cfg.box3d = !cfg.box3d; break;
+    case MI_ESP_BOX2D: cfg.box2d = !cfg.box2d; break;
+    case MI_ESP_FILL: cfg.filledBox = !cfg.filledBox; break;
+    case MI_ESP_NAME: cfg.nameTags = !cfg.nameTags; break;
+    case MI_ESP_TRACER: cfg.tracer = !cfg.tracer; break;
+    case MI_ESP_TRAJ: cfg.showTrajectory = !cfg.showTrajectory; break;
+    case MI_ESP_LINE: { int v = cfg.lineWidth + dir; if (v < 1) v = 1; if (v > 5) v = 5; cfg.lineWidth = v; break; }
+    case MI_ESP_DIST: { int step = fast ? 50 : 10; int v = (int)cfg.maxDistance + dir * step; if (v < 10) v = 10; if (v > 500) v = 500; cfg.maxDistance = v; break; }
+    case MI_ESP_TRAJ_TICKS: { int step = fast ? 10 : 1; int v = cfg.trajectoryTicks + dir * step; if (v < 5) v = 5; if (v > 63) v = 63; cfg.trajectoryTicks = v; break; }
+
     default: return;
     }
-    commit_clicker_config();
+    commit_config();
 }
-
 static bool menu_key_is_nav(int vk) {
     return vk == VK_INSERT || vk == VK_ESCAPE || vk == VK_UP || vk == VK_DOWN ||
            vk == VK_LEFT || vk == VK_RIGHT || vk == VK_RETURN || vk == VK_TAB ||
@@ -926,10 +1007,11 @@ static void menu_capture_commit(int vk) {
     case MI_ATTACK_KEY: g_cfg.clicker.attackGateKey = vk; break;
     case MI_PLACE_KEY: g_cfg.clicker.placeGateKey = vk; break;
     case MI_ESP_KEY: g_cfg.espKey = vk; g_espKeyAtomic.store(vk, std::memory_order_release); break;
+    case MI_PROFILE_KEY: g_cfg.profileKey = vk; g_profileKeyAtomic.store(vk, std::memory_order_release); break;
     default: break;
     }
     g_menuCaptureKey.store(false, std::memory_order_release);
-    commit_clicker_config();
+    commit_config();
     esp_log("[menu] 热键已绑定 target=%d vk=%d", target, vk);
 }
 
@@ -939,7 +1021,7 @@ static bool key_down_any(int vk) {
 
 static void menu_activate_item(int item) {
     switch (item) {
-    case MI_HOTKEY: case MI_ATTACK_KEY: case MI_PLACE_KEY: case MI_ESP_KEY:
+    case MI_HOTKEY: case MI_ATTACK_KEY: case MI_PLACE_KEY: case MI_ESP_KEY: case MI_PROFILE_KEY:
         g_menuCaptureTarget.store(item, std::memory_order_release);
         g_menuCaptureKey.store(true, std::memory_order_release);
         g_menuDirty.store(true, std::memory_order_release);
@@ -994,8 +1076,9 @@ static void menu_mouse_down(int x, int y) {
         int x0 = 0, x1 = 0;
         menu_slider_rect_local(pw, row, x0, x1);
         float t = (float)((x - px) - x0) / (float)(x1 - x0);
-        menu_slider_apply(item, t, g_cfg.clicker);
+        menu_slider_apply(item, t, g_cfg);
         clicker_apply_settings(g_cfg.clicker);
+        esp_cfg_publish();   // ESP 滑块拖动期间也发布新值，游戏线程立即可见
         g_menuDirty.store(true, std::memory_order_release);
     } else {
         menu_activate_item(item);
@@ -1015,8 +1098,9 @@ static void menu_mouse_move(int x, int y, bool leftDown) {
             int x0 = 0, x1 = 0;
             menu_slider_rect_local(pw, drag, x0, x1);
             float t = (float)((x - px) - x0) / (float)(x1 - x0);
-            menu_slider_apply(item, t, g_cfg.clicker);
+            menu_slider_apply(item, t, g_cfg);
             clicker_apply_settings(g_cfg.clicker);
+            esp_cfg_publish();   // ESP 滑块拖动期间也发布新值，游戏线程立即可见
             // 拖动节流：缓存重绘约 60Hz，避免每个 WM_MOUSEMOVE 都整面板重画
             static DWORD lastSliderRender = 0;
             DWORD nowT = GetTickCount();
@@ -1042,7 +1126,7 @@ static void menu_mouse_up(int x, int y) {
     (void)x; (void)y;
     if (g_menuDrag.load(std::memory_order_relaxed) >= 0) {
         g_menuDrag.store(-1, std::memory_order_release);
-        commit_clicker_config();   // 拖动结束才写盘
+        commit_config();   // 拖动结束才写盘
     }
     if (g_overlay.hwnd() && GetCapture() == g_overlay.hwnd())
         ReleaseCapture();
@@ -1169,7 +1253,8 @@ static void menu_handle_input(HWND gameHwnd) {
 
     static bool prevInsert = false, prevUp = false, prevDown = false,
                 prevLeft = false, prevRight = false, prevEnter = false,
-                prevEsc = false, prevTab = false, prevEspKey = false;
+                prevEsc = false, prevTab = false, prevEspKey = false,
+                prevProfileKey = false;
     static DWORD nextRepeat = 0;
     static int  repeatDir = 0;
 
@@ -1187,6 +1272,7 @@ static void menu_handle_input(HWND gameHwnd) {
         prevEnter = key_down_any(VK_RETURN);
         prevEsc = key_down_any(VK_ESCAPE);
         prevTab = key_down_any(VK_TAB);
+        prevProfileKey = key_down_any(g_cfg.profileKey);
         if (key_down_any(VK_ESCAPE)) {
             g_menuCaptureKey.store(false, std::memory_order_release);
             g_menuDirty.store(true, std::memory_order_release);
@@ -1200,12 +1286,24 @@ static void menu_handle_input(HWND gameHwnd) {
         return;
     }
 
+    // ---- 方案循环热键：无论菜单是否打开都可用（与 ESP 热键同级）----
+    bool profileKeyDown = key_down_any(g_cfg.profileKey);
+    if (profileKeyDown && !prevProfileKey && g_cfg.profileKey != 0) {
+        menu_switch_profile(1);
+        commit_config();
+        wchar_t msg[64];
+        swprintf(msg, 64, L"配置方案 %d", g_cfg.activeProfile + 1);
+        show_toast(msg, 0x66A3FF);
+    }
+    prevProfileKey = profileKeyDown;
+
     // ---- ESP 快捷键：无论菜单是否打开都可直接开关，并写回 esp.ini ----
     bool espKeyDown = key_down_any(g_cfg.espKey);
     if (espKeyDown && !prevEspKey && g_cfg.espKey != 0) {
         bool next = !g_espEnabled.load(std::memory_order_acquire);
         g_espEnabled.store(next, std::memory_order_release);
         g_cfg.enabled = next;
+        esp_cfg_publish();
         config_save(g_cfg);
         show_toast(next ? L"ESP 已开启" : L"ESP 已关闭", next ? 0x52D88C : 0x9AA7B8);
         g_menuDirty.store(true, std::memory_order_release);
@@ -1281,7 +1379,7 @@ static void menu_handle_input(HWND gameHwnd) {
 // ============================================================
 // 菜单离屏绘制（分页 + 标签页 + 悬浮提示条）
 // ============================================================
-static void draw_menu_panel(Overlay& ov, int panelW, int panelH) {
+static void draw_menu_panel(Overlay& ov, int panelW, int panelH, const EspConfig& cfg) {
     ClickerSnapshot cs = clicker_snapshot();
     const ClickerSettings& cl = cs.settings;
 
@@ -1345,6 +1443,7 @@ static void draw_menu_panel(Overlay& ov, int panelW, int panelH) {
         case MI_ESP: value = g_espEnabled.load() ? on : off; color = g_espEnabled.load() ? colOn : colOff; break;
         case MI_ESP_KEY: value = clicker_key_name(g_espKeyAtomic.load(std::memory_order_acquire)); color = colAcc; break;
         case MI_PROFILE: swprintf(buf, 128, L"方案 %d", activeProfile + 1); value = buf; color = colAcc; break;
+        case MI_PROFILE_KEY: value = clicker_key_name(g_profileKeyAtomic.load(std::memory_order_acquire)); color = colAcc; break;
         case MI_LEFT: value = cl.leftEnabled ? on : off; color = cl.leftEnabled ? colOn : colOff; break;
         case MI_LEFT_CPS: swprintf(buf, 128, L"%.1f", cl.cpsLeft10 / 10.0); value = buf; color = colAcc; break;
         case MI_LEFT_PRESET: value = L"6/10/15/20/30/40"; color = colAcc; break;
@@ -1358,6 +1457,7 @@ static void draw_menu_panel(Overlay& ov, int panelW, int panelH) {
         case MI_PLACE_GATE: value = cl.placeGate ? on : off; color = cl.placeGate ? colOn : colOff; break;
         case MI_PLACE_KEY: value = clicker_key_name(cl.placeGateKey); color = colAcc; break;
         case MI_CURSOR_GATE: value = cl.cursorGate ? on : off; color = cl.cursorGate ? colOn : colOff; break;
+        case MI_INGAME_GATE: value = cl.inGameGate ? on : off; color = cl.inGameGate ? colOn : colOff; break;
         case MI_RANDOM: value = cl.randomEnabled ? on : off; color = cl.randomEnabled ? colOn : colOff; break;
         case MI_RANDOM_RANGE: swprintf(buf, 128, L"±%d CPS", cl.randomRange); value = buf; color = colAcc; break;
         case MI_HUMAN_MODE: value = kHumanNames[cl.humanizeMode & 3]; color = colAcc; break;
@@ -1365,6 +1465,18 @@ static void draw_menu_panel(Overlay& ov, int panelW, int panelH) {
         case MI_CPS_MAX: swprintf(buf, 128, L"%d", cl.cpsMax); value = buf; color = colAcc; break;
         case MI_AUTOSTOP: value = cl.autoStopEnabled ? on : off; color = cl.autoStopEnabled ? colOn : colOff; break;
         case MI_AUTOSTOP_SEC: swprintf(buf, 128, L"%d 秒", cl.autoStopSeconds); value = buf; color = colAcc; break;
+        case MI_ESP_PLAYERS: value = cfg.showPlayers ? on : off; color = cfg.showPlayers ? colOn : colOff; break;
+        case MI_ESP_MOBS: value = cfg.showMobs ? on : off; color = cfg.showMobs ? colOn : colOff; break;
+        case MI_ESP_OTHERS: value = cfg.showOthers ? on : off; color = cfg.showOthers ? colOn : colOff; break;
+        case MI_ESP_BOX3D: value = cfg.box3d ? on : off; color = cfg.box3d ? colOn : colOff; break;
+        case MI_ESP_BOX2D: value = cfg.box2d ? on : off; color = cfg.box2d ? colOn : colOff; break;
+        case MI_ESP_FILL: value = cfg.filledBox ? on : off; color = cfg.filledBox ? colOn : colOff; break;
+        case MI_ESP_NAME: value = cfg.nameTags ? on : off; color = cfg.nameTags ? colOn : colOff; break;
+        case MI_ESP_TRACER: value = cfg.tracer ? on : off; color = cfg.tracer ? colOn : colOff; break;
+        case MI_ESP_TRAJ: value = cfg.showTrajectory ? on : off; color = cfg.showTrajectory ? colOn : colOff; break;
+        case MI_ESP_LINE: swprintf(buf, 128, L"%d px", cfg.lineWidth); value = buf; color = colAcc; break;
+        case MI_ESP_DIST: swprintf(buf, 128, L"%d", (int)cfg.maxDistance); value = buf; color = colAcc; break;
+        case MI_ESP_TRAJ_TICKS: swprintf(buf, 128, L"%d tick", cfg.trajectoryTicks); value = buf; color = colAcc; break;
         }
 
         float ry = (float)(rowsTop + i * kMenuRowH);
@@ -1379,11 +1491,10 @@ static void draw_menu_panel(Overlay& ov, int panelW, int panelH) {
 
         ov.drawText(10, ry, label, i == cursor ? colText : colDim, 13);
         if (menu_is_slider(item)) {
-            float vw = ov.measureText(value, 13);
             ov.drawText(126, ry, value, i == cursor ? colAcc : color, 13);
             int x0 = 0, x1 = 0;
             menu_slider_rect_local(panelW, i, x0, x1);
-            float t = menu_slider_norm(item, cl);
+            float t = menu_slider_norm(item, cfg);
             float thumbX = x0 + t * (float)(x1 - x0);
             ov.fillRectOpaque((float)x0, ry + 7, (float)x1, ry + 10, colTrack);
             ov.fillRectOpaque((float)x0, ry + 7, thumbX, ry + 10, colAcc);
@@ -1409,7 +1520,8 @@ static void draw_menu_panel(Overlay& ov, int panelW, int panelH) {
     }
 
     int fy = tipY + kMenuTipH - 1;
-    swprintf(buf, 128, L"状态  攻击:%s  放置:%s  %s",
+    swprintf(buf, 128, L"状态  游戏:%s  攻击:%s  放置:%s  %s",
+             cs.combatReady ? (cs.inGame ? L"内" : L"外") : L"未就绪",
              cs.combatReady ? (cs.canAttack ? L"可" : L"否") : L"未就绪",
              cs.combatReady ? (cs.canPlace ? L"可" : L"否") : L"未就绪",
              cs.running ? L"连点中" : L"已停止");
@@ -1426,7 +1538,7 @@ static bool menu_need_render(int w, int h) {
     return (int)(GetTickCount() - g_menuLastRenderMs) >= 250;
 }
 
-static void render_menu_cache(int w, int h) {
+static void render_menu_cache(int w, int h, const EspConfig& cfg) {
     int px = 0, py = 0, pw = 0, ph = 0;
     menu_panel_rect(w, h, px, py, pw, ph);
     if (pw <= 0 || ph <= 0) return;
@@ -1439,7 +1551,7 @@ static void render_menu_cache(int w, int h) {
     g_menuCache.h = ph;
 
     if (g_overlay.begin_offscreen(pw, ph, g_menuCache.px.data())) {
-        draw_menu_panel(g_overlay, pw, ph);
+        draw_menu_panel(g_overlay, pw, ph, cfg);
         g_overlay.end_offscreen();
         g_menuCache.valid = true;
     }
@@ -1495,14 +1607,15 @@ static void draw_toast(Overlay& ov, int w, int h) {
 
 // ---- 方案 B：在调用线程（游戏渲染线程）内直接绘制覆盖层 ----
 // ESP 仍逐帧重绘；菜单使用离屏缓存，静态时每帧只 memcpy 面板区域。
-static void esp_draw_overlay() {
-    // 先取预投影数据（g_dataMutex 不嵌套在 g_overlayLock 内，避免锁序反转）
+static void esp_draw_overlay(const EspConfig& cfg) {
+    // 先取预投影数据：swap 而不是 copy，避免每帧对两个 vector 重新分配。
+    // （g_dataMutex 不嵌套在 g_overlayLock 内，避免锁序反转）
     std::vector<ScreenBox> boxes;
     std::vector<TrajectoryData> trajs;
     {
         std::lock_guard<std::mutex> lock(g_dataMutex);
-        boxes = g_boxes;
-        trajs = g_trajectories;
+        boxes.swap(g_boxes);
+        trajs.swap(g_trajectories);
     }
 
     std::lock_guard<std::mutex> lock(g_overlayLock);
@@ -1523,13 +1636,19 @@ static void esp_draw_overlay() {
         g_overlay.lock(w, h);
     }
 
-    int lw = std::max(1, g_cfg.lineWidth - 1);
+    int lw = std::max(1, cfg.lineWidth - 1);
     if (espOn) {
         for (const auto& b : boxes) {
             for (int i = 0; i < b.segCount; ++i)
                 g_overlay.drawLine(b.segs[i].x0, b.segs[i].y0,
                                    b.segs[i].x1, b.segs[i].y1, b.color, lw);
             if (b.hasFill) g_overlay.fillRect(b.minX, b.minY, b.maxX, b.maxY, b.color);
+            if (b.has2d) {   // 2D 屏幕矩形外框
+                g_overlay.drawLine(b.minX, b.minY, b.maxX, b.minY, b.color, lw);
+                g_overlay.drawLine(b.maxX, b.minY, b.maxX, b.maxY, b.color, lw);
+                g_overlay.drawLine(b.maxX, b.maxY, b.minX, b.maxY, b.color, lw);
+                g_overlay.drawLine(b.minX, b.maxY, b.minX, b.minY, b.color, lw);
+            }
             if (!b.name.empty()) {
                 float tw = g_overlay.measureText(b.name, 14);
                 g_overlay.drawText(b.nameX - tw * 0.5f, b.nameY, b.name, b.color, 14);
@@ -1554,7 +1673,7 @@ static void esp_draw_overlay() {
         }
     }
 
-    if (espOn && g_cfg.nameTags) {
+    if (espOn && cfg.nameTags) {
         ClickerSnapshot cs = clicker_snapshot();
         wchar_t status[96];
         swprintf(status, 96, L"ESP ON   CLICKER %s   ATK:%s   PLACE:%s",
@@ -1562,10 +1681,10 @@ static void esp_draw_overlay() {
                  cs.combatReady ? (cs.canAttack ? L"可" : L"否") : L"-",
                  cs.combatReady ? (cs.canPlace ? L"可" : L"否") : L"-");
         float sw = g_overlay.measureText(status, 14);
-        g_overlay.drawText((float)w - sw - 10, (float)h - 22, status, g_cfg.colHud, 14);
+        g_overlay.drawText((float)w - sw - 10, (float)h - 22, status, cfg.colHud, 14);
     }
 
-    if (renderMenu) render_menu_cache(w, h);
+    if (renderMenu) render_menu_cache(w, h, cfg);
     if (menuOpen) blit_menu_cache(w, h);
     if (toastActive) draw_toast(g_overlay, w, h);
 
@@ -1578,13 +1697,19 @@ static void esp_draw_overlay() {
 // 采集相机 + 实体 + 连点器门控状态，并在本线程直接绘制覆盖层。
 void esp_on_swap() {
     if (!g_running) return;
+    auto cfgSnapshot = esp_cfg_get();
+    if (!cfgSnapshot) return;
+    const EspConfig& cfg = *cfgSnapshot;
     bool enabled = g_espEnabled.load(std::memory_order_acquire);
     bool menuOpen = g_menuVisible.load(std::memory_order_acquire);
     bool toastActive = toast_active();
 
     // 空闲优化：ESP 关、菜单关、门控关、无 Toast 时，完全不碰 JVM。
     ClickerSnapshot idleSnap = clicker_snapshot();
-    bool needCombat = menuOpen || idleSnap.settings.attackGate || idleSnap.settings.placeGate;
+    bool needCombat = menuOpen ||
+                      (idleSnap.running && (idleSnap.settings.attackGate ||
+                                            idleSnap.settings.placeGate ||
+                                            idleSnap.settings.inGameGate));
     if (!enabled && !needCombat && !toastActive) {
         // 空闲预热：每 1s 尝试一次符号解析。这样第一次按 Insert 打开菜单时
         // JNI 符号早已就绪，不会把解析开销压在开菜单那一帧上。
@@ -1608,21 +1733,25 @@ void esp_on_swap() {
     if (!cam.ok) return;
 
     // 聊天界面（按 T 打开）：keepOnChat 配置决定是否仍渲染。
-    if (cam.guiOpen && cam.screenIsChat && g_cfg.keepOnChat)
+    if (cam.guiOpen && cam.screenIsChat && cfg.keepOnChat)
         cam.guiOpen = false;
 
     // ---- 连点器门控状态（5ms 节流，与参考 DLL 采样周期一致）----
     // 仅在菜单打开或门控开启时读取，未开启门控时 zero JNI 开销。
     {
         ClickerSnapshot cs = clicker_snapshot();
-        bool needCombat = menuOpen || cs.settings.attackGate || cs.settings.placeGate;
+        bool needCombat = menuOpen ||
+                          (cs.running && (cs.settings.attackGate ||
+                                          cs.settings.placeGate ||
+                                          cs.settings.inGameGate));
         if (needCombat && !cam.guiOpen) {
             static DWORD lastCombatTick = 0;
             DWORD nowT = GetTickCount();
             if ((int)(nowT - lastCombatTick) >= 5) {
                 lastCombatTick = nowT;
                 CombatStatus st = jvm_read_combat_status();
-                clicker_set_combat(st.ok, st.ok && st.canAttack, st.ok && st.canPlace);
+                clicker_set_combat(st.ok, st.ok && st.inGame,
+                                   st.ok && st.canAttack, st.ok && st.canPlace);
             }
         }
     }
@@ -1634,7 +1763,7 @@ void esp_on_swap() {
     if (enabled && !cam.guiOpen) {
         jvm_collect_entities(cam.px, cam.py, cam.pz, cam.partialTick, entities);
         // 帧间轻微平滑：抹平 20Hz tick 边界折角，框更丝滑（时间常数 smoothMs）
-        smooth_entities(entities, g_cfg.smoothMs);
+        smooth_entities(entities, cfg.smoothMs);
         // 在游戏线程内完成 3D→屏幕投影（同一帧相机/位置），box 与画面同步
         int w = 0, h = 0;
         if (g_gameHwnd) {
@@ -1643,29 +1772,27 @@ void esp_on_swap() {
             w = rc.right; h = rc.bottom;
         }
         if (w > 0 && h > 0) {
-            project_entities(cam, entities, w, h, boxes);
+            project_entities(cam, entities, w, h, cfg, boxes);
             // 弹射物轨迹预测（同一帧相机/位置/速度），生成屏幕折线
-            project_trajectories(cam, entities, w, h, trajs);
+            project_trajectories(cam, entities, w, h, cfg, trajs);
             // 弓蓄力预判：本地玩家拉弓预测本次发射轨迹（追加到 trajs）
             PlayerInfo lp = jvm_read_player();
-            project_bow_predict(cam, lp, entities, w, h, trajs);
+            project_bow_predict(cam, lp, entities, w, h, cfg, trajs);
             // 其他玩家弓蓄力预判：渲染每个正在拉弓的玩家的抛物线
-            project_other_bow_predicts(cam, entities, w, h, trajs);
+            project_other_bow_predicts(cam, entities, w, h, cfg, trajs);
         }
     }
 
     {
         std::lock_guard<std::mutex> lock(g_dataMutex);
         g_cam = cam;
-        g_entities.swap(entities);
         g_boxes.swap(boxes);
         g_trajectories.swap(trajs);
-        ++g_dataSeq;
     }
     // ESP / 菜单 / 右下角 Toast 任一需要显示时，在游戏渲染线程同步绘制。
     if ((enabled || menuOpen || toastActive) &&
         g_overlayVisible.load(std::memory_order_acquire) && !cam.guiOpen)
-        esp_draw_overlay();
+        esp_draw_overlay(cfg);
 }
 
 // ---- 渲染线程（覆盖层宿主 + 菜单键盘处理） ----
@@ -1682,7 +1809,6 @@ static void render_loop(HWND gameHwnd) {
     int hostHz = g_cfg.renderHz;
     if (hostHz < 30) hostHz = 30;
     if (hostHz > 250) hostHz = 250;
-    const int hostPeriodMs = 1000 / hostHz;
 
     // Win10 1803+ 高精度可等待定时器：Sleep(8) 仍可能被调度器按 15.6ms
     // 节拍合并，导致菜单实际只有 ~60Hz；改用 CREATE_WAITABLE_TIMER_HIGH_RESOLUTION。
@@ -1800,6 +1926,15 @@ static void render_loop(HWND gameHwnd) {
             }
         }
 
+        // 空闲降频：ESP/菜单/Toast 都关时宿主只需 30Hz 轮询热键与窗口状态；
+        // 菜单打开恢复 renderHz（跟手），仅 ESP 显示时用 60Hz 维持可见性对齐。
+        int targetHz = menuOpen ? hostHz
+                     : (g_espEnabled.load(std::memory_order_acquire) || toastActive)
+                       ? (std::min)(60, hostHz)
+                       : 30;
+        int hostPeriodMs = 1000 / targetHz;
+        if (hostPeriodMs < 4) hostPeriodMs = 4;
+
         if (hHostTimer) {
             // 相对周期唤醒；负 100ns 单位表示相对时间
             LARGE_INTEGER due;
@@ -1826,6 +1961,8 @@ extern "C" __declspec(dllexport) DWORD WINAPI esp_thread_main(LPVOID) {
     g_espEnabled = g_cfg.enabled;
     g_activeProfileAtomic.store(g_cfg.activeProfile, std::memory_order_release);
     g_espKeyAtomic.store(g_cfg.espKey, std::memory_order_release);
+    g_profileKeyAtomic.store(g_cfg.profileKey, std::memory_order_release);
+    esp_cfg_publish();   // 游戏线程从此刻开始只读发布快照
     clicker_apply_settings(g_cfg.clicker);
     clicker_set_settings_changed_callback(on_clicker_hotkey_changed);
     clicker_set_hotkey_toast_callback(on_clicker_hotkey_toast);

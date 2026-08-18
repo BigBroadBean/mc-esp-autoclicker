@@ -6,6 +6,7 @@ esp_shm.txt
 /esp.ini
 
 # ---- 编译中间文件 ----
+/build_tmp/
 *.o
 *.obj
 *.pdb
@@ -18,6 +19,7 @@ esp_shm.txt
 # ---- 冒烟测试可执行文件 ----
 tools/smoke_host.exe
 tools/smoke_mouse.exe
+tools/smoke_target.exe
 
 # ---- 系统文件 ----
 Thumbs.db

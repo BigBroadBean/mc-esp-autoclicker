@@ -28,7 +28,7 @@ std::wstring dll_directory();
 void dll_set_directory(const wchar_t* dir);
 
 // ------------------------------------------------------------
-// 日志：写入 DLL 同目录下的 esp_log.txt（UTF-8）
+// 日志：写入 dll_directory() 目录下的 esp_log.txt（单文件 EXE 模式即 exe 目录）
 // ------------------------------------------------------------
 void esp_log(const char* fmt, ...);
 void esp_log_w(const wchar_t* fmt, ...);
@@ -56,6 +56,7 @@ struct ClickerSettings {
     bool    placeGate        = false;       // 仅手持方块类物品时右键连点（JNI 内部读取）
     int     placeGateKey     = VK_F7;       // 放置门控热键
     bool    cursorGate       = false;       // 光标门控：光标可见（背包/聊天/菜单）时暂停
+    bool    inGameGate       = false;       // 游戏内门控：player==null（主菜单/加载中）时暂停连点
 };
 
 // ------------------------------------------------------------
@@ -89,6 +90,7 @@ struct EspConfig {
     static constexpr int kClickerProfiles = 4;
     ClickerSettings profiles[4];          // 4 套配置方案（对应 AutoClicker 的方案槽）
     int             activeProfile = 0;    // 0..3
+    int             profileKey    = VK_F8; // 循环切换 4 套连点方案的热键（全局，不属于方案本身）
 
     uint32_t colPlayer  = 0xFF5555;         // 玩家：红
     uint32_t colMob     = 0xFFAA00;         // 生物：橙
@@ -100,9 +102,9 @@ struct EspConfig {
     uint32_t colLandHit = 0xFF0000;         // 弓预判命中实体方块：红（红石）
 };
 
-// 从 DLL 同目录读取 esp.ini；不存在时写入默认配置。
+// 从 dll_directory() 读取 esp.ini；不存在时写入默认配置（单文件 EXE 模式即 exe 目录）。
 void config_load(EspConfig& cfg);
-// 把当前配置写回 DLL 同目录 esp.ini（菜单修改后立即持久化）。
+// 把当前配置写回 dll_directory() 下的 esp.ini（菜单修改后立即持久化）。
 void config_save(const EspConfig& cfg);
 
 // ------------------------------------------------------------

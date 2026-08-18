@@ -21,6 +21,7 @@ struct ClickerSnapshot {
     ClickerSettings settings;
     bool    running = false;
     bool    combatReady = false;   // JNI 战斗状态已成功读取
+    bool    inGame = false;        // 已进入游戏（player != null）
     bool    canAttack = false;
     bool    canPlace  = false;
     int     realtimeCps = 0;
@@ -50,7 +51,7 @@ void clicker_set_settings_changed_callback(void (*fn)());
 void clicker_set_hotkey_toast_callback(void (*fn)(int kind, bool on));
 
 // 游戏渲染线程每帧调用：写入 JNI 战斗状态（无外部消息传递）。
-void clicker_set_combat(bool ready, bool canAttack, bool canPlace);
+void clicker_set_combat(bool ready, bool inGame, bool canAttack, bool canPlace);
 
 // 菜单打开时暂停连点（防止点菜单时同时向游戏窗口 PostMessage）。
 void clicker_set_menu_open(bool open);

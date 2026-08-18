@@ -133,6 +133,7 @@ void config_load(EspConfig& cfg) {
     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
                            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) {
+        esp_log("[cfg] 未找到 esp.ini，生成默认配置: %ls", path.c_str());
         config_save(cfg);   // 不存在则生成默认配置
         return;
     }
@@ -189,6 +190,11 @@ void config_load(EspConfig& cfg) {
                 else if (key == "showTrajectory") set(cfg.showTrajectory);
                 else if (key == "trajectoryTicks") seti(cfg.trajectoryTicks);
             } else if (section == "clicker" || section.rfind("clickerProfile", 0) == 0) {
+                if (section == "clicker" && key == "profileKey") {
+                    seti(cfg.profileKey);
+                    line.clear();
+                    continue;
+                }
                 ClickerSettings* pcl = nullptr;
                 if (section == "clicker") {
                     pcl = &cfg.clicker;
@@ -221,6 +227,7 @@ void config_load(EspConfig& cfg) {
                 else if (key == "placeGate") set(cl.placeGate);
                 else if (key == "placeGateKey") seti(cl.placeGateKey);
                 else if (key == "cursorGate") set(cl.cursorGate);
+                else if (key == "inGameGate") set(cl.inGameGate);
             } else if (isColor) {
                 if (key == "player") setc(cfg.colPlayer);
                 else if (key == "mob") setc(cfg.colMob);
@@ -281,8 +288,10 @@ void config_save(const EspConfig& cfg) {
 
     auto saveClicker = [&](const ClickerSettings& cl, const std::string& sectionName, bool withActive) {
         line(sectionName.c_str());
-        if (withActive)
+        if (withActive) {
             line((std::string("activeProfile = ") + std::to_string(cfg.activeProfile)).c_str());
+            line((std::string("profileKey = ") + std::to_string(cfg.profileKey) + "             ; VK_F8 = 119，循环切换方案").c_str());
+        }
         line((std::string("enabled = ") + b2s(cl.enabled) + "              ; 注入后初始是否启用连点").c_str());
         line((std::string("toggleKey = ") + std::to_string(cl.toggleKey) + "               ; VK_MBUTTON = 4").c_str());
         line((std::string("leftEnabled = ") + b2s(cl.leftEnabled)).c_str());
@@ -302,6 +311,7 @@ void config_save(const EspConfig& cfg) {
         line((std::string("placeGate = ") + b2s(cl.placeGate) + "            ; 仅手持方块时右键连点").c_str());
         line((std::string("placeGateKey = ") + std::to_string(cl.placeGateKey) + "              ; VK_F7 = 118").c_str());
         line((std::string("cursorGate = ") + b2s(cl.cursorGate) + "           ; 光标可见时暂停连点").c_str());
+        line((std::string("inGameGate = ") + b2s(cl.inGameGate) + "         ; 仅已进入游戏（player!=null）时连点").c_str());
     };
 
     saveClicker(cfg.clicker, "[clicker]", true);
@@ -331,5 +341,7 @@ void config_save(const EspConfig& cfg) {
         DWORD wr = 0;
         WriteFile(h, out.data(), (DWORD)out.size(), &wr, nullptr);
         CloseHandle(h);
+    } else {
+        esp_log("[cfg] 保存 esp.ini 失败 err=%lu path=%ls", GetLastError(), path.c_str());
     }
 }

@@ -1,30 +1,33 @@
 // ============================================================
-//  injector.cpp — MC ESP 注入器
+//  loader.cpp — mc_esp.exe 单文件自注入加载器
 //
-//  自动查找 Minecraft (java.exe/javaw.exe) 进程，并把与
-//  injector.exe 同目录下的 mc_esp.dll 注入进去。
+//  mc_esp.dll 不再作为单独文件分发：构建时被转换为字节数组
+//  (build_tmp/payload.h) 编译进本 EXE。运行时：
+//    1. 自动查找 Minecraft (java.exe/javaw.exe) 进程；
+//    2. 把内嵌 DLL 解包到 %TEMP%；
+//    3. 通过命名内存映射把【exe 所在目录】告诉 DLL；
+//    4. CreateRemoteThread + LoadLibraryW 注入；
+//    5. 注入完成后删除临时 DLL。
 //
 //  用法:
-//    injector.exe                自动查找 Minecraft 并注入
-//    injector.exe -pid <PID>     注入指定 PID
-//
-//  说明:
-//    - 全路径使用宽字符 API，路径含中文也能正常注入。
-//    - 注入方式: CreateRemoteThread + LoadLibraryW。
-//    - 注入后 mc_esp.dll 会在自身 DllMain 里完成模块隐藏并启动 ESP 线程。
+//    mc_esp.exe                自动查找 Minecraft 并注入
+//    mc_esp.exe -pid <PID>     注入指定 PID
+//    mc_esp.exe -find          仅查找进程，不注入
 // ============================================================
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <tlhelp32.h>
 
-#include <cwchar>
 #include <cstdarg>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cwchar>
 
-static const wchar_t* kDllName = L"mc_esp.dll";
+#include "payload.h"   // g_payloadDll / g_payloadDllSize（build.bat 生成）
+
 static const wchar_t* kTitleSub = L"Minecraft";
 
 // ------------------------------------------------------------
@@ -46,9 +49,6 @@ static void PrintW(const wchar_t* fmt, ...) {
         WriteConsoleW(out, buf, (DWORD)len, &written, nullptr)) {
         return;
     }
-
-    // 标准输出被重定向时 WriteConsoleW 会失败：转成 UTF-8 字节输出。
-    // 优先 WriteFile 绕过 CRT 文本模式换行转换；再失败才回退 fwrite。
     char utf8[8192];
     int n8 = WideCharToMultiByte(CP_UTF8, 0, buf, (int)len, utf8, sizeof(utf8), nullptr, nullptr);
     if (n8 > 0) {
@@ -68,7 +68,6 @@ static void PrintW(const wchar_t* fmt, ...) {
 static bool IsJavaProcessW(DWORD pid) {
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snap == INVALID_HANDLE_VALUE) return false;
-
     PROCESSENTRY32W pe = {};
     pe.dwSize = sizeof(pe);
     bool isJava = false;
@@ -89,7 +88,6 @@ static bool IsJavaProcessW(DWORD pid) {
 static int ListJavaPids(DWORD* out, int max) {
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snap == INVALID_HANDLE_VALUE) return 0;
-
     PROCESSENTRY32W pe = {};
     pe.dwSize = sizeof(pe);
     int count = 0;
@@ -113,42 +111,27 @@ struct FindCtx { const wchar_t* sub; DWORD pid; };
 static BOOL CALLBACK EnumTitleProc(HWND hwnd, LPARAM lp) {
     auto* ctx = (FindCtx*)lp;
     if (!IsWindowVisible(hwnd)) return TRUE;
-
     wchar_t title[256] = {};
     if (GetWindowTextW(hwnd, title, 256) == 0) return TRUE;
     if (!wcsstr(title, ctx->sub)) return TRUE;
-
     DWORD pid = 0;
     GetWindowThreadProcessId(hwnd, &pid);
-    if (pid && IsJavaProcessW(pid)) {
-        ctx->pid = pid;
-        return FALSE;   // 找到，停止枚举
-    }
+    if (pid && IsJavaProcessW(pid)) { ctx->pid = pid; return FALSE; }
     return TRUE;
 }
 
 static BOOL CALLBACK EnumClassProc(HWND hwnd, LPARAM lp) {
     auto* ctx = (FindCtx*)lp;
     if (!IsWindowVisible(hwnd)) return TRUE;
-
     wchar_t cls[128] = {};
     if (GetClassNameW(hwnd, cls, 128) == 0) return TRUE;
     if (!wcsstr(cls, L"GLFW") && !wcsstr(cls, L"LWJGL")) return TRUE;
-
     DWORD pid = 0;
     GetWindowThreadProcessId(hwnd, &pid);
-    if (pid && IsJavaProcessW(pid)) {
-        ctx->pid = pid;
-        return FALSE;
-    }
+    if (pid && IsJavaProcessW(pid)) { ctx->pid = pid; return FALSE; }
     return TRUE;
 }
 
-// 返回 0 表示未找到。
-// 查找顺序：
-//   1) 窗口标题包含 "Minecraft" 的 Java 进程
-//   2) 窗口类为 GLFW/LWJGL 的 Java 进程（部分启动器会改窗口标题）
-//   3) 系统里只有一个 java/javaw 进程时，直接使用它
 static DWORD AutoFindMinecraftPid() {
     FindCtx ctx = {kTitleSub, 0};
     EnumWindows(EnumTitleProc, (LPARAM)&ctx);
@@ -168,13 +151,12 @@ static DWORD AutoFindMinecraftPid() {
     if (n > 1) {
         PrintW(L"[!] 发现 %d 个 Java 进程，无法自动确定 Minecraft：", n);
         for (int i = 0; i < n; ++i) PrintW(L"    PID=%lu", pids[i]);
-        PrintW(L"    请指定: injector.exe -pid <PID>");
+        PrintW(L"    请指定: mc_esp.exe -pid <PID>");
         return 0;
     }
-
     PrintW(L"[!] 未找到 Minecraft 进程。");
-    PrintW(L"    请先启动游戏，再运行 injector.exe；");
-    PrintW(L"    或手动指定: injector.exe -pid <PID>");
+    PrintW(L"    请先启动游戏，再运行 mc_esp.exe；");
+    PrintW(L"    或手动指定: mc_esp.exe -pid <PID>");
     return 0;
 }
 
@@ -185,22 +167,17 @@ static bool GetSelfDir(wchar_t* out, size_t cap) {
     wchar_t exe[MAX_PATH] = {};
     DWORD got = GetModuleFileNameW(nullptr, exe, MAX_PATH);
     if (got == 0 || got >= MAX_PATH) {
-        PrintW(L"[!] 无法获取 injector.exe 路径");
+        PrintW(L"[!] 无法获取 mc_esp.exe 路径");
         return false;
     }
     wchar_t* slash = wcsrchr(exe, L'\\');
     if (slash) *(slash + 1) = L'\0';
     if (wcslen(exe) >= cap) {
-        PrintW(L"[!] injector.exe 路径过长");
+        PrintW(L"[!] mc_esp.exe 路径过长");
         return false;
     }
     wcscpy(out, exe);
     return true;
-}
-
-static void JoinPath(wchar_t* out, size_t cap, const wchar_t* dir, const wchar_t* name) {
-    wcscpy(out, dir);
-    wcscat(out, name);
 }
 
 static ULONGLONG FileSizeW(const wchar_t* path) {
@@ -210,45 +187,147 @@ static ULONGLONG FileSizeW(const wchar_t* path) {
 }
 
 // ------------------------------------------------------------
+// 清理之前运行遗留的临时 payload（游戏已退出时通常都能删除成功）
+// ------------------------------------------------------------
+static void CleanupStalePayloads() {
+    wchar_t pattern[MAX_PATH] = {};
+    DWORD tn = GetTempPathW(MAX_PATH, pattern);
+    if (tn == 0 || tn >= MAX_PATH - 16) return;
+    wcscat(pattern, L"mc_esp_payload_*.dll");
+
+    WIN32_FIND_DATAW fd = {};
+    HANDLE h = FindFirstFileW(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+            wchar_t full[MAX_PATH] = {};
+            DWORD tn2 = GetTempPathW(MAX_PATH, full);
+            if (tn2 && tn2 < MAX_PATH - 32) {
+                wcscat(full, fd.cFileName);
+                DeleteFileW(full);
+            }
+        }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+}
+
+// ------------------------------------------------------------
+// 内嵌 DLL 解包到 %TEMP%
+// ------------------------------------------------------------
+static bool ExtractPayload(wchar_t* out, size_t cap) {
+    wchar_t temp[MAX_PATH] = {};
+    DWORD tn = GetTempPathW(MAX_PATH, temp);
+    if (tn == 0 || tn >= MAX_PATH) {
+        PrintW(L"[!] 无法获取临时目录");
+        return false;
+    }
+    wchar_t name[64];
+    swprintf(name, 64, L"mc_esp_payload_%08lX.dll",
+             (unsigned long)(GetTickCount() ^ GetCurrentProcessId()));
+    wcscpy(out, temp);
+    wcscat(out, name);
+    if (wcslen(out) >= cap) { PrintW(L"[!] 临时路径过长"); return false; }
+
+    HANDLE h = CreateFileW(out, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ,
+                           nullptr, CREATE_ALWAYS,
+                           FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        PrintW(L"[!] 创建临时 DLL 失败，错误码 %lu", GetLastError());
+        return false;
+    }
+    DWORD written = 0;
+    BOOL ok = WriteFile(h, g_payloadDll, g_payloadDllSize, &written, nullptr);
+    FlushFileBuffers(h);
+    CloseHandle(h);
+    if (!ok || written != g_payloadDllSize) {
+        PrintW(L"[!] 写入临时 DLL 失败（%lu / %u）", written, g_payloadDllSize);
+        DeleteFileW(out);
+        return false;
+    }
+    return true;
+}
+
+// ------------------------------------------------------------
+// 把 exe 目录通过命名内存映射告诉目标进程内的 DLL。
+// 名称固定为 Local\mc_esp_dir_<pid>，DLL 的 DllMain 会优先读取。
+// ------------------------------------------------------------
+static bool PublishConfigDir(DWORD pid, const wchar_t* dir,
+                             HANDLE& map, void*& view) {
+    map = nullptr; view = nullptr;
+    wchar_t name[96];
+    swprintf(name, 96, L"Local\\mc_esp_dir_%lu", pid);
+
+    const DWORD size = 4096;
+    map = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE,
+                             0, size, name);
+    if (!map) {
+        PrintW(L"[!] 创建目录映射失败，错误码 %lu", GetLastError());
+        return false;
+    }
+    view = MapViewOfFile(map, FILE_MAP_WRITE, 0, 0, size);
+    if (!view) {
+        PrintW(L"[!] 映射目录视图失败，错误码 %lu", GetLastError());
+        CloseHandle(map);
+        map = nullptr;
+        return false;
+    }
+    memset(view, 0, size);
+    memcpy(view, dir, (wcslen(dir) + 1) * sizeof(wchar_t));
+    return true;
+}
+
+static void CloseConfigDir(HANDLE& map, void*& view) {
+    if (view) { UnmapViewOfFile(view); view = nullptr; }
+    if (map) { CloseHandle(map); map = nullptr; }
+}
+
+// ------------------------------------------------------------
 // 注入: CreateRemoteThread + LoadLibraryW
 // ------------------------------------------------------------
-static bool InjectDllW(DWORD pid, const wchar_t* dllPath) {
+static bool InjectDllW(DWORD pid, const wchar_t* dllPath, const wchar_t* cfgDir) {
     HANDLE proc = OpenProcess(PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION |
                                   PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ,
                               FALSE, pid);
     if (!proc) {
         PrintW(L"[!] OpenProcess(%lu) 失败，错误码 %lu", pid, GetLastError());
-        PrintW(L"    请确认游戏正在运行；如仍失败，尝试以管理员身份运行 injector.exe。");
+        PrintW(L"    请确认游戏正在运行；如仍失败，尝试以管理员身份运行 mc_esp.exe。");
         return false;
     }
 
-    // 位数检查：本注入器按 64 位编译，只能注入 64 位 Java
 #ifdef _WIN64
     BOOL targetWow64 = FALSE;
     if (IsWow64Process(proc, &targetWow64) && targetWow64) {
-        PrintW(L"[!] 目标 Minecraft 是 32 位进程，而 injector/mc_esp.dll 是 64 位。");
+        PrintW(L"[!] 目标 Minecraft 是 32 位进程，而 mc_esp.exe 是 64 位。");
         PrintW(L"    请使用 64 位 Java 启动 Minecraft。");
         CloseHandle(proc);
         return false;
     }
 #else
-    PrintW(L"[!] 当前 injector 是 32 位版本，mc_esp.dll 为 64 位，无法注入。");
-    PrintW(L"    请用 64 位 g++ 重新编译 injector（不要加 -m32）。");
+    PrintW(L"[!] 当前 mc_esp.exe 是 32 位版本，无法注入 64 位游戏。");
+    PrintW(L"    请用 64 位 g++ 重新编译（不要加 -m32）。");
     CloseHandle(proc);
     return false;
 #endif
+
+    HANDLE cfgMap = nullptr;
+    void* cfgView = nullptr;
+    if (!PublishConfigDir(pid, cfgDir, cfgMap, cfgView)) {
+        CloseHandle(proc);
+        return false;
+    }
 
     const SIZE_T bytes = (wcslen(dllPath) + 1) * sizeof(wchar_t);
     void* remote = VirtualAllocEx(proc, nullptr, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!remote) {
         PrintW(L"[!] VirtualAllocEx 失败，错误码 %lu", GetLastError());
+        CloseConfigDir(cfgMap, cfgView);
         CloseHandle(proc);
         return false;
     }
-
     if (!WriteProcessMemory(proc, remote, dllPath, bytes, nullptr)) {
         PrintW(L"[!] WriteProcessMemory 失败，错误码 %lu", GetLastError());
         VirtualFreeEx(proc, remote, 0, MEM_RELEASE);
+        CloseConfigDir(cfgMap, cfgView);
         CloseHandle(proc);
         return false;
     }
@@ -258,6 +337,7 @@ static bool InjectDllW(DWORD pid, const wchar_t* dllPath) {
     if (!loadLibraryW) {
         PrintW(L"[!] 找不到 kernel32!LoadLibraryW");
         VirtualFreeEx(proc, remote, 0, MEM_RELEASE);
+        CloseConfigDir(cfgMap, cfgView);
         CloseHandle(proc);
         return false;
     }
@@ -268,6 +348,7 @@ static bool InjectDllW(DWORD pid, const wchar_t* dllPath) {
     if (!thread) {
         PrintW(L"[!] CreateRemoteThread 失败，错误码 %lu", GetLastError());
         VirtualFreeEx(proc, remote, 0, MEM_RELEASE);
+        CloseConfigDir(cfgMap, cfgView);
         CloseHandle(proc);
         return false;
     }
@@ -275,53 +356,46 @@ static bool InjectDllW(DWORD pid, const wchar_t* dllPath) {
     PrintW(L"[*] 远程线程已创建，等待 LoadLibraryW 返回 ...");
     DWORD wait = WaitForSingleObject(thread, 15000);
     DWORD exitCode = 0;
-    if (wait == WAIT_OBJECT_0) {
-        GetExitCodeThread(thread, &exitCode);
-    }
+    if (wait == WAIT_OBJECT_0) GetExitCodeThread(thread, &exitCode);
     CloseHandle(thread);
 
     if (wait != WAIT_OBJECT_0) {
         PrintW(L"[!] 等待远程线程超时，注入可能未完成。");
         VirtualFreeEx(proc, remote, 0, MEM_RELEASE);
+        CloseConfigDir(cfgMap, cfgView);
         CloseHandle(proc);
         return false;
     }
 
     // LoadLibraryW 的 64 位返回值经线程退出码截断后可能为 0，不能仅凭它判定失败；
-    // 这里只作提示，真正验证靠下方 esp_log.txt 是否增长。
-    if (exitCode == 0) {
+    // 真正验证靠下方 esp_log.txt 是否增长。
+    if (exitCode == 0)
         PrintW(L"[!] 远程线程返回 0（64 位返回值截断或加载失败），继续检查日志确认 ...");
-    }
 
     VirtualFreeEx(proc, remote, 0, MEM_RELEASE);
+    CloseConfigDir(cfgMap, cfgView);   // DllMain 已读完目录，映射可以关闭
     CloseHandle(proc);
     return true;
 }
 
 // ------------------------------------------------------------
-// 注入结果验证：mc_esp.dll 的 DllMain 会写 esp_log.txt / esp_log_new.txt
+// 注入结果验证：DLL 会写 exe 目录下的 esp_log.txt / esp_log_new.txt
 // ------------------------------------------------------------
 static void VerifyByLog(const wchar_t* dir) {
-    wchar_t log1[MAX_PATH];
-    wchar_t log2[MAX_PATH];
-    JoinPath(log1, MAX_PATH, dir, L"esp_log.txt");
-    JoinPath(log2, MAX_PATH, dir, L"esp_log_new.txt");
-
+    wchar_t log1[MAX_PATH], log2[MAX_PATH];
+    wcscpy(log1, dir); wcscat(log1, L"esp_log.txt");
+    wcscpy(log2, dir); wcscat(log2, L"esp_log_new.txt");
     const ULONGLONG old1 = FileSizeW(log1);
     const ULONGLONG old2 = FileSizeW(log2);
-
-    Sleep(1200);   // 给 DllMain 写日志留时间
-
+    Sleep(1200);
     const ULONGLONG new1 = FileSizeW(log1);
     const ULONGLONG new2 = FileSizeW(log2);
-
     if (new1 > old1 || new2 > old2) {
-        PrintW(L"[+] 日志已更新，DLL 已成功加载并执行 DllMain。");
+        PrintW(L"[+] 日志已更新，注入成功（esp.ini / esp_log.txt 位于 mc_esp.exe 同目录）。");
     } else {
-        PrintW(L"[!] 未观察到日志增长。若游戏内没有 ESP 效果，请检查：");
-        PrintW(L"    1) mc_esp.dll 是否与 injector.exe 同目录");
-        PrintW(L"    2) 游戏 Java 是否为 64 位");
-        PrintW(L"    3) 是否以管理员身份运行 injector.exe");
+        PrintW(L"[!] 未观察到日志增长。请检查：");
+        PrintW(L"    1) 游戏 Java 是否为 64 位");
+        PrintW(L"    2) 是否以管理员身份运行 mc_esp.exe");
     }
 }
 
@@ -334,14 +408,14 @@ int main(int argc, char** argv) {
     DWORD pid = 0;
     bool findOnly = false;
     if (argc == 2 && _stricmp(argv[1], "-find") == 0) {
-        findOnly = true;                    // 仅查找，不注入
+        findOnly = true;
     } else if (argc == 3 && _stricmp(argv[1], "-pid") == 0) {
         pid = (DWORD)strtoul(argv[2], nullptr, 10);
     } else if (argc != 1) {
         PrintW(L"用法:");
-        PrintW(L"  injector.exe                自动查找 Minecraft 并注入");
-        PrintW(L"  injector.exe -find          仅查找 Minecraft 进程，不注入");
-        PrintW(L"  injector.exe -pid <PID>     注入指定 PID");
+        PrintW(L"  mc_esp.exe                自动查找 Minecraft 并注入");
+        PrintW(L"  mc_esp.exe -find          仅查找 Minecraft 进程，不注入");
+        PrintW(L"  mc_esp.exe -pid <PID>     注入指定 PID");
         return 1;
     }
 
@@ -350,10 +424,8 @@ int main(int argc, char** argv) {
         pid = AutoFindMinecraftPid();
         if (pid == 0) return 1;
         PrintW(L"[*] 找到 Minecraft 进程，PID=%lu", pid);
-    } else {
-        if (!IsJavaProcessW(pid)) {
-            PrintW(L"[!] 警告：PID %lu 不是 java/javaw 进程，仍将尝试注入。", pid);
-        }
+    } else if (!IsJavaProcessW(pid)) {
+        PrintW(L"[!] 警告：PID %lu 不是 java/javaw 进程，仍将尝试注入。", pid);
     }
 
     if (findOnly) {
@@ -361,25 +433,30 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    wchar_t dir[MAX_PATH];
-    if (!GetSelfDir(dir, MAX_PATH)) return 1;
+    wchar_t exeDir[MAX_PATH];
+    if (!GetSelfDir(exeDir, MAX_PATH)) return 1;
 
-    wchar_t dllPath[MAX_PATH];
-    JoinPath(dllPath, MAX_PATH, dir, kDllName);
-    PrintW(L"[*] DLL 路径: %ls", dllPath);
+    CleanupStalePayloads();
 
-    if (GetFileAttributesW(dllPath) == INVALID_FILE_ATTRIBUTES) {
-        PrintW(L"[!] 找不到 %ls", dllPath);
-        PrintW(L"    请把 mc_esp.dll 与 injector.exe 放在同一目录。");
-        return 1;
+    wchar_t tempDll[MAX_PATH];
+    if (!ExtractPayload(tempDll, MAX_PATH)) return 1;
+
+    PrintW(L"[*] 单文件内嵌 DLL 已解包: %ls", tempDll);
+    PrintW(L"[*] 配置目录: %ls", exeDir);
+
+    bool ok = InjectDllW(pid, tempDll, exeDir);
+
+    // 注入完成后尝试清理临时 DLL；目标进程仍占用时交给系统延迟删除。
+    if (DeleteFileW(tempDll)) {
+        PrintW(L"[*] 临时 DLL 已清理");
+    } else {
+        MoveFileExW(tempDll, nullptr, MOVEFILE_DELAY_UNTIL_REBOOT);
+        PrintW(L"[!] 临时 DLL 暂被游戏占用，已安排稍后清理（%ls）", tempDll);
     }
 
-    if (!InjectDllW(pid, dllPath)) return 1;
-
+    if (!ok) return 1;
     PrintW(L"[+] 注入流程完成，正在验证 DLL 初始化日志 ...");
-    VerifyByLog(dir);
-
-    PrintW(L"[*] 提示：游戏内按 INSERT 呼出连点器菜单（ESP 与连点设置均在菜单内）。");
+    VerifyByLog(exeDir);
+    PrintW(L"[*] 游戏内按 INSERT 呼出菜单（ESP / 连点设置均在菜单内）。");
     return 0;
 }
-

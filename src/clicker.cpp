@@ -24,6 +24,7 @@ static std::atomic<bool> g_stop{false};           // 工作线程退出标志
 static HANDLE            g_threadHandle = nullptr;
 
 static std::atomic<bool>      g_combatReady{false};
+static std::atomic<bool>      g_inGame{false};
 static std::atomic<bool>      g_canAttack{false};
 static std::atomic<bool>      g_canPlace{false};
 static std::atomic<long long> g_combatLastMs{0};
@@ -82,6 +83,7 @@ ClickerSnapshot clicker_snapshot() {
     }
     s.running = g_running.load(std::memory_order_acquire);
     s.combatReady = g_combatReady.load(std::memory_order_acquire);
+    s.inGame = g_inGame.load(std::memory_order_acquire);
     s.canAttack = g_canAttack.load(std::memory_order_acquire);
     s.canPlace = g_canPlace.load(std::memory_order_acquire);
     s.clickCount = g_clickCount.load(std::memory_order_relaxed);
@@ -127,8 +129,9 @@ void clicker_set_menu_open(bool open) {
     g_menuOpen.store(open, std::memory_order_release);
 }
 
-void clicker_set_combat(bool ready, bool canAttack, bool canPlace) {
+void clicker_set_combat(bool ready, bool inGame, bool canAttack, bool canPlace) {
     g_combatReady.store(ready, std::memory_order_release);
+    g_inGame.store(inGame, std::memory_order_release);
     g_canAttack.store(canAttack, std::memory_order_release);
     g_canPlace.store(canPlace, std::memory_order_release);
     if (ready) g_combatLastMs.store((long long)GetTickCount64(), std::memory_order_release);
@@ -343,6 +346,8 @@ static DWORD WINAPI clicker_thread_main(LPVOID) {
                           (combatFresh && g_canAttack.load(std::memory_order_acquire));
         bool canPlaceGate = !cfg.placeGate ||
                             (combatFresh && g_canPlace.load(std::memory_order_acquire));
+        bool inGameOk = !cfg.inGameGate ||
+                        (combatFresh && g_inGame.load(std::memory_order_acquire));
         bool cursorGate = !cfg.cursorGate || !cursor_showing();
         bool menuGate = !g_menuOpen.load(std::memory_order_acquire);
 
@@ -358,13 +363,13 @@ static DWORD WINAPI clicker_thread_main(LPVOID) {
 
         if (!canAtkGate) releaseLeft();
         if (!canPlaceGate) releaseRight();
-        if (!cursorGate || !menuGate || !fgOk || !running) {
+        if (!inGameOk || !cursorGate || !menuGate || !fgOk || !running) {
             releaseLeft();
             releaseRight();
         }
 
-        bool leftActive = running && cfg.leftEnabled && fgOk && canAtkGate && cursorGate && menuGate;
-        bool rightActive = running && cfg.rightEnabled && fgOk && canPlaceGate && cursorGate && menuGate;
+        bool leftActive = running && cfg.leftEnabled && fgOk && canAtkGate && inGameOk && cursorGate && menuGate;
+        bool rightActive = running && cfg.rightEnabled && fgOk && canPlaceGate && inGameOk && cursorGate && menuGate;
 
         bool leftHeld = leftActive && (key_down(VK_LBUTTON) || cfg.keep);
         if (leftHeld) {

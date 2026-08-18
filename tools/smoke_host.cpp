@@ -22,11 +22,11 @@ int main() {
     ShowWindow(hwnd, SW_SHOW);
     SetForegroundWindow(hwnd);
 
-    // 固定加载仓库根目录的 mc_esp.dll，避免测试进程污染 Injector 目录的默认配置
+    // 固定加载 build_tmp 下的中间 DLL，避免测试进程污染任何已发布配置
     wchar_t exePath[MAX_PATH] = {};
     GetModuleFileNameW(nullptr, exePath, MAX_PATH);
     wchar_t* slash = wcsrchr(exePath, L'\\');
-    if (slash) wcscpy(slash + 1, L"..\\mc_esp.dll");
+    if (slash) wcscpy(slash + 1, L"..\\build_tmp\\mc_esp.dll");
     wchar_t dllFull[MAX_PATH] = {};
     GetFullPathNameW(exePath, MAX_PATH, dllFull, nullptr);
     printf("dll=%ls\n", dllFull);

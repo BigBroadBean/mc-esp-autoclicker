@@ -23,7 +23,7 @@ HANDLE spawn_hidden_thread(LPTHREAD_START_ROUTINE fn) {
     return CreateThread(nullptr, 0, rtlStart, (LPVOID)fn, 0, nullptr);
 }
 
-// 手动映射注入时由注入器传入的信息（布局必须与 injector.cpp 中的一致）
+// 手动映射注入时由注入器传入的信息（本仓库当前使用 loader.cpp 的 LoadLibrary 路径）
 struct EspManualInfo {
     wchar_t dir[MAX_PATH * 2];   // DLL 目录（esp.ini / esp_log.txt 所在）
     uintptr_t base;              // 手动映射镜像基址（用于读自身 PE 头/注册 .pdata）
@@ -172,6 +172,31 @@ extern "C" __declspec(dllexport) DWORD WINAPI esp_manual_entry(LPVOID param) {
     return 0;
 }
 
+// 单文件 EXE 加载器会在 CreateRemoteThread 之前创建命名内存映射，
+// 把 exe 所在目录告诉即将进入 DllMain 的本 DLL。这样 esp.ini / esp_log.txt
+// 仍在用户双击的 exe 旁边，而不是解包后临时 DLL 的目录。
+// 名称只依赖当前进程 PID；加载器与 DLL 两端固定 4096 字节宽字符容量。
+static void apply_injected_directory() {
+    wchar_t name[96];
+    swprintf(name, 96, L"Local\\mc_esp_dir_%lu", GetCurrentProcessId());
+    HANDLE h = OpenFileMappingW(FILE_MAP_READ, FALSE, name);
+    if (!h) {
+        esp_log("[dll] 目录映射不存在（回退 DLL 自身目录）");
+        return;
+    }
+    void* view = MapViewOfFile(h, FILE_MAP_READ, 0, 0, 0);
+    if (view) {
+        wchar_t buf[MAX_PATH * 2] = {0};
+        memcpy(buf, view, sizeof(buf) - sizeof(wchar_t));
+        if (buf[0]) {
+            dll_set_directory(buf);
+            esp_log("[dll] 使用加载器目录映射: %ls", buf);
+        }
+        UnmapViewOfFile(view);
+    }
+    CloseHandle(h);
+}
+
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
     switch (reason) {
         case DLL_PROCESS_ATTACH: {
@@ -189,6 +214,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
                     manualMap = true;
                 }
             }
+            // 单文件 EXE：最后再读加载器传入的 exe 目录，覆盖临时 DLL 目录。
+            // 否则 GetModuleFileNameW 会先写入 %TEMP% 的 DLL 路径。
+            apply_injected_directory();
             if (manualMap) {
                 // 手动映射：无模块项、无文件路径。线程由 esp_manual_entry 启动。
                 esp_log("[dll] mc_esp 手动映射加载（PEB 无模块项）");
