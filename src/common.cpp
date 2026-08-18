@@ -239,6 +239,7 @@ void config_load(EspConfig& cfg) {
                 else if (key == "trajectoryTicks") seti(cfg.trajectoryTicks);
             } else if (section == "aim") {
                 if (key == "enabled") set(cfg.aim.enabled);
+                else if (key == "toggleKey") seti(cfg.aim.toggleKey);
                 else if (key == "triggerMode" || key == "mode") seti(cfg.aim.triggerMode);
                 else if (key == "triggerKey" || key == "key") seti(cfg.aim.triggerKey);
                 else if (key == "aimPlayers" || key == "players") set(cfg.aim.aimPlayers);
@@ -391,6 +392,7 @@ void config_save(const EspConfig& cfg) {
 
     line("[aim]");
     line((std::string("enabled = ") + b2s(cfg.aim.enabled) + "              ; 自瞄总开关（默认关闭）").c_str());
+    line((std::string("toggleKey = ") + std::to_string(cfg.aim.toggleKey) + "              ; VK_F9 = 120，直接开/关自瞄总开关").c_str());
     line((std::string("triggerMode = ") + std::to_string(cfg.aim.triggerMode) + "            ; 0=按住左键 1=按住右键 2=按住自瞄键 3=切换 4=始终").c_str());
     line((std::string("triggerKey = ") + std::to_string(cfg.aim.triggerKey) + "              ; VK_XBUTTON1 = 5（自瞄键）").c_str());
     line((std::string("aimPlayers = ") + b2s(cfg.aim.aimPlayers)).c_str());

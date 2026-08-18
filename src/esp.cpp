@@ -684,7 +684,7 @@ enum MenuItem {
     MI_ESP_NAME, MI_ESP_TRACER,
     MI_ESP_LINE, MI_ESP_DIST,
     MI_ESP_TRAJ, MI_ESP_TRAJ_TICKS,
-    MI_AIM, MI_AIM_MODE, MI_AIM_KEY,
+    MI_AIM, MI_AIM_MODE, MI_AIM_KEY, MI_AIM_TOGGLE_KEY,
     MI_AIM_PLAYERS, MI_AIM_MOBS, MI_AIM_OTHERS,
     MI_AIM_PRIORITY,
     MI_AIM_FOV, MI_AIM_DIST,
@@ -696,15 +696,17 @@ enum MenuItem {
     MI_COUNT
 };
 
-static constexpr int kMenuMaxRows = 19;
+static constexpr int kMenuMaxRows = 20;
 static const int kPageClickItems[kMenuMaxRows] = {
     MI_CLICKER, MI_LEFT, MI_LEFT_CPS, MI_LEFT_PRESET,
     MI_RIGHT, MI_RIGHT_CPS, MI_RIGHT_PRESET,
     MI_KEEP, MI_HOTKEY, -1, -1, -1, -1, -1,
     -1, -1,
     -1, -1,
+    -1,
     -1
 };
+
 
 
 
@@ -713,8 +715,10 @@ static const int kPageGateItems[kMenuMaxRows] = {
     MI_CURSOR_GATE, MI_INGAME_GATE, -1, -1, -1, -1, -1, -1, -1, -1,
     -1, -1,
     -1, -1,
+    -1,
     -1
 };
+
 
 
 
@@ -723,8 +727,10 @@ static const int kPageAdvItems[kMenuMaxRows] = {
     MI_CPS_MAX, MI_AUTOSTOP, MI_AUTOSTOP_SEC, -1, -1, -1, -1, -1, -1, -1,
     -1, -1,
     -1, -1,
+    -1,
     -1
 };
+
 
 
 
@@ -737,13 +743,15 @@ static const int kPageEspItems[kMenuMaxRows] = {
     MI_ESP_TRAJ, MI_ESP_TRAJ_TICKS,
     -1, -1,
     -1, -1,
+    -1,
     -1
 };
 
 
 
+
 static const int kPageAimItems[kMenuMaxRows] = {
-    MI_AIM, MI_AIM_MODE, MI_AIM_KEY,
+    MI_AIM, MI_AIM_MODE, MI_AIM_KEY, MI_AIM_TOGGLE_KEY,
     MI_AIM_PLAYERS, MI_AIM_MOBS, MI_AIM_OTHERS,
     MI_AIM_PRIORITY,
     MI_AIM_FOV, MI_AIM_DIST,
@@ -756,15 +764,17 @@ static const int kPageSysItems[kMenuMaxRows] = {
     MI_PROFILE, MI_PROFILE_KEY, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
     -1, -1,
     -1, -1,
+    -1,
     -1
 };
+
 
 
 
 static const int* kPageItems[PAGE_COUNT] = {
     kPageClickItems, kPageGateItems, kPageAdvItems, kPageEspItems, kPageAimItems, kPageSysItems
 };
-static const int kPageRowCount[PAGE_COUNT] = { 9, 6, 7, 14, 19, 2 };
+static const int kPageRowCount[PAGE_COUNT] = { 9, 6, 7, 14, 20, 2 };
 
 struct MenuItemDef { const wchar_t* label; const wchar_t* tip; };
 static const MenuItemDef kMenuItemDefs[MI_COUNT] = {
@@ -807,6 +817,7 @@ static const MenuItemDef kMenuItemDefs[MI_COUNT] = {
     { L"自瞄",         L"自瞄总开关。准星在碰撞箱外时瞄向最近表面点，命中后转为视平线高度中心。" },
     { L"触发模式",     L"按住左键 / 按住右键 / 按住自瞄键 / 自瞄键切换 / 始终瞄准。" },
     { L"自瞄键",       L"按住或切换自瞄的快捷键；Enter 后按任意键绑定。" },
+    { L"自瞄开关热键", L"游戏内直接开/关自瞄总开关的快捷键，和 ESP 开关热键同级；Enter 后按任意键绑定。" },
     { L"目标玩家",     L"是否把玩家纳入自瞄目标。" },
     { L"目标生物",     L"是否把怪物/动物等生物纳入自瞄目标。" },
     { L"目标其他",     L"是否把其他实体纳入自瞄目标（弹射物永远排除）。" },
@@ -1139,6 +1150,7 @@ static void menu_capture_commit(int vk) {
     case MI_ESP_KEY: g_cfg.espKey = vk; g_espKeyAtomic.store(vk, std::memory_order_release); break;
     case MI_PROFILE_KEY: g_cfg.profileKey = vk; g_profileKeyAtomic.store(vk, std::memory_order_release); break;
     case MI_AIM_KEY: g_cfg.aim.triggerKey = vk; break;
+    case MI_AIM_TOGGLE_KEY: g_cfg.aim.toggleKey = vk; break;
     default: break;
     }
     g_menuCaptureKey.store(false, std::memory_order_release);
@@ -1153,7 +1165,7 @@ static bool key_down_any(int vk) {
 static void menu_activate_item(int item) {
     switch (item) {
     case MI_HOTKEY: case MI_ATTACK_KEY: case MI_PLACE_KEY: case MI_ESP_KEY:
-    case MI_PROFILE_KEY: case MI_AIM_KEY:
+    case MI_PROFILE_KEY: case MI_AIM_KEY: case MI_AIM_TOGGLE_KEY:
         g_menuCaptureTarget.store(item, std::memory_order_release);
         g_menuCaptureKey.store(true, std::memory_order_release);
         g_menuDirty.store(true, std::memory_order_release);
@@ -1405,7 +1417,7 @@ static void menu_handle_input(HWND gameHwnd) {
     static bool prevInsert = false, prevUp = false, prevDown = false,
                 prevLeft = false, prevRight = false, prevEnter = false,
                 prevEsc = false, prevTab = false, prevEspKey = false,
-                prevProfileKey = false;
+                prevProfileKey = false, prevAimToggleKey = false;
     static DWORD nextRepeat = 0;
     static int  repeatDir = 0;
 
@@ -1424,6 +1436,7 @@ static void menu_handle_input(HWND gameHwnd) {
         prevEsc = key_down_any(VK_ESCAPE);
         prevTab = key_down_any(VK_TAB);
         prevProfileKey = key_down_any(g_cfg.profileKey);
+        prevAimToggleKey = key_down_any(g_cfg.aim.toggleKey);
         if (key_down_any(VK_ESCAPE)) {
             g_menuCaptureKey.store(false, std::memory_order_release);
             g_menuDirty.store(true, std::memory_order_release);
@@ -1505,6 +1518,22 @@ static void menu_handle_input(HWND gameHwnd) {
         g_menuDirty.store(true, std::memory_order_release);
     }
     prevEspKey = espKeyDown;
+
+    // ---- 自瞄总开关快捷键：与 ESP 开关热键同级，直接开/关并写回 esp.ini ----
+    bool aimToggleDown = key_down_any(g_cfg.aim.toggleKey);
+    if (aimToggleDown && !prevAimToggleKey && g_cfg.aim.toggleKey != 0) {
+        g_cfg.aim.enabled = !g_cfg.aim.enabled;
+        if (!g_cfg.aim.enabled) aimbot_set_toggle_on(false);   // 关闭总开关时同步清触发开关
+        aimbot_apply_settings(g_cfg.aim);
+        esp_cfg_publish();
+        config_save(g_cfg);
+        show_toast(g_cfg.aim.enabled ? L"自瞄总开关：开" : L"自瞄总开关：关",
+                   g_cfg.aim.enabled ? 0x52D88C : 0x9AA7B8);
+        g_menuDirty.store(true, std::memory_order_release);
+        esp_log("[aim] 总开关热键 vk=%d -> %s",
+                g_cfg.aim.toggleKey, g_cfg.aim.enabled ? "开" : "关");
+    }
+    prevAimToggleKey = aimToggleDown;
 
     bool insert = key_down_any(g_cfg.menuKey);
     if (insert && !prevInsert) {
@@ -1676,6 +1705,7 @@ static void draw_menu_panel(Overlay& ov, int panelW, int panelH, const EspConfig
         case MI_AIM: value = cfg.aim.enabled ? on : off; color = cfg.aim.enabled ? colOn : colOff; break;
         case MI_AIM_MODE: value = kAimModeNames[cfg.aim.triggerMode % AIM_TRIGGER_COUNT]; color = colAcc; break;
         case MI_AIM_KEY: value = clicker_key_name(cfg.aim.triggerKey); color = colAcc; break;
+        case MI_AIM_TOGGLE_KEY: value = clicker_key_name(cfg.aim.toggleKey); color = colAcc; break;
         case MI_AIM_PLAYERS: value = cfg.aim.aimPlayers ? on : off; color = cfg.aim.aimPlayers ? colOn : colOff; break;
         case MI_AIM_MOBS: value = cfg.aim.aimMobs ? on : off; color = cfg.aim.aimMobs ? colOn : colOff; break;
         case MI_AIM_OTHERS: value = cfg.aim.aimOthers ? on : off; color = cfg.aim.aimOthers ? colOn : colOff; break;

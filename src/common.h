@@ -86,6 +86,7 @@ enum AimSecondTarget {
 
 struct AimSettings {
     bool    enabled          = false;       // 自瞄总开关（默认关闭）
+    int     toggleKey        = VK_F9;       // 自瞄总开关快捷键（直接开/关，并保存）
     int     triggerMode      = AIM_TRIGGER_HOLD_LMB;   // 触发模式
     int     triggerKey       = VK_XBUTTON1; // 按住/切换自瞄的热键
     bool    aimPlayers       = true;        // 瞄准玩家
