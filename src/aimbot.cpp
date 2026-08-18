@@ -30,6 +30,7 @@ static std::atomic<bool> g_stop{false};
 static std::atomic<bool> g_menuOpen{false};
 static std::atomic<bool> g_active{false};
 static std::atomic<bool> g_toggleOn{false};
+static std::atomic<bool> g_hotkeyDown{false};   // 渲染线程热键路径同步写入
 static std::atomic<int>  g_visualMode{0};
 static HANDLE            g_threadHandle = nullptr;
 
@@ -55,6 +56,10 @@ static void clamp_settings(AimSettings& a) {
     if (a.predictionTicks > 20) a.predictionTicks = 20;
     if (a.switchCooldownMs < 0) a.switchCooldownMs = 0;
     if (a.switchCooldownMs > 2000) a.switchCooldownMs = 2000;
+    if (a.secondTarget < 0) a.secondTarget = 0;
+    if (a.secondTarget >= AIM_SECOND_COUNT) a.secondTarget = AIM_SECOND_LEVEL;
+    if (a.secondSmooth < 1) a.secondSmooth = 1;
+    if (a.secondSmooth > 10) a.secondSmooth = 10;
     if (a.visualMode < 0) a.visualMode = 0;
     if (a.visualMode > 3) a.visualMode = 3;
 }
@@ -91,6 +96,18 @@ void aimbot_set_menu_open(bool open) {
         std::lock_guard<std::mutex> lk(g_targetMutex);
         g_target = t;
     }
+}
+
+void aimbot_set_hotkey_down(bool down) {
+    g_hotkeyDown.store(down, std::memory_order_release);
+}
+
+void aimbot_toggle_trigger() {
+    g_toggleOn.store(!g_toggleOn.load(std::memory_order_acquire), std::memory_order_release);
+}
+
+bool aimbot_toggle_on() {
+    return g_toggleOn.load(std::memory_order_acquire);
 }
 
 void aimbot_clear_target() {
@@ -175,13 +192,18 @@ struct AimCandidate {
     int     idx = -1;
     double  score = 1e30;
     double  tie = 1e30;
-    float   sx = 0.f, sy = 0.f;
     bool    locked = false;
-    double  wx = 0, wy = 0, wz = 0;
+    // 第一目标：最近点（未命中时）或射线进盒点（命中时）
+    float   firstSx = 0.f, firstSy = 0.f;
+    double  firstWx = 0, firstWy = 0, firstWz = 0;
+    // 第二目标：命中碰撞箱后的落点（按 secondTarget 模式计算）
+    double  secondWx = 0, secondWy = 0, secondWz = 0;
 };
 
 int    g_lastAimId = -1;
 DWORD  g_lastAimSwitchMs = 0;
+int    g_transitionEntity = -1;   // 正在做第一→第二目标过渡的实体
+DWORD  g_transitionStartMs = 0;
 }
 
 void aimbot_update_target(const CamData& cam, int screenW, int screenH,
@@ -239,30 +261,50 @@ void aimbot_update_target(const CamData& cam, int screenW, int screenH,
         AimCandidate c;
         c.idx = i;
         c.locked = hit;
+
         if (hit) {
-            // 已瞄到碰撞箱：水平中心 + 本地玩家视平线高度（钳制在盒内）。
-            c.wx = px;
-            c.wz = pz;
-            c.wy = std::max(box.minY, std::min(box.maxY, cam.py));
-            if (!cam_project(cb, cam.px, cam.py, cam.pz, c.wx, c.wy, c.wz, c.sx, c.sy)) {
-                // 兜底：射线进盒点（极少发生）
-                c.wx = cam.px + cb.fx * tHit;
-                c.wy = cam.py + cb.fy * tHit;
-                c.wz = cam.pz + cb.fz * tHit;
-                if (!cam_project(cb, cam.px, cam.py, cam.pz, c.wx, c.wy, c.wz, c.sx, c.sy))
-                    continue;
-            }
+            // 第一目标 = 准星射线进入碰撞箱的表面点。
+            c.firstWx = cam.px + cb.fx * tHit;
+            c.firstWy = cam.py + cb.fy * tHit;
+            c.firstWz = cam.pz + cb.fz * tHit;
+            c.firstWy = std::max(box.minY, std::min(box.maxY, c.firstWy));
         } else {
-            // 未瞄到：瞄准离准星射线最近的碰撞箱表面点。
+            // 第一目标 = 离准星射线最近的碰撞箱表面点。
             closest_point_on_aabb_to_ray(cam.px, cam.py, cam.pz,
                                          cb.fx, cb.fy, cb.fz, box,
-                                         c.wx, c.wy, c.wz);
-            if (!cam_project(cb, cam.px, cam.py, cam.pz, c.wx, c.wy, c.wz, c.sx, c.sy))
-                continue;
+                                         c.firstWx, c.firstWy, c.firstWz);
+        }
+        if (!cam_project(cb, cam.px, cam.py, cam.pz,
+                         c.firstWx, c.firstWy, c.firstWz,
+                         c.firstSx, c.firstSy))
+            continue;
+
+        // 第二目标：命中碰撞箱后的落点（可选择放平/不放平/保持最近点）。
+        if (hit) {
+            c.secondWx = px;
+            c.secondWz = pz;
+            switch (cfg.secondTarget) {
+            case AIM_SECOND_FIRST_HEIGHT:
+                c.secondWy = std::max(box.minY, std::min(box.maxY, c.firstWy));
+                break;
+            case AIM_SECOND_KEEP_NEAREST:
+                c.secondWx = c.firstWx;
+                c.secondWy = c.firstWy;
+                c.secondWz = c.firstWz;
+                break;
+            case AIM_SECOND_LEVEL:
+            default:
+                c.secondWy = std::max(box.minY, std::min(box.maxY, cam.py));
+                break;
+            }
+        } else {
+            c.secondWx = c.firstWx;
+            c.secondWy = c.firstWy;
+            c.secondWz = c.firstWz;
         }
 
-        const float dpx = c.sx - cx;
-        const float dpy = c.sy - cy;
+        const float dpx = c.firstSx - cx;
+        const float dpy = c.firstSy - cy;
         const float centerDistSq = dpx * dpx + dpy * dpy;
         if (centerDistSq > radiusPxSq) continue;   // 超出自瞄 FOV
         const float centerDist = std::sqrt(centerDistSq);
@@ -324,7 +366,7 @@ void aimbot_update_target(const CamData& cam, int screenW, int screenH,
         double hx = 0, hy = 0, hz = 0;
         bool hitBlock = false;
         const bool clipOk = jvm_clip_block(cam.px, cam.py, cam.pz,
-                                           c.wx, c.wy, c.wz,
+                                           c.secondWx, c.secondWy, c.secondWz,
                                            hx, hy, hz, hitBlock);
         if (!clipOk || !hitBlock) { picked = &c; break; }
     }
@@ -334,23 +376,60 @@ void aimbot_update_target(const CamData& cam, int screenW, int screenH,
         return;
     }
 
-    const int eid = entities[picked->idx].id;
+    const EntityData& ent = entities[picked->idx];
+    const int eid = ent.id;
     const DWORD now = GetTickCount();
     if (eid != g_lastAimId) {
         g_lastAimId = eid;
         g_lastAimSwitchMs = now;
     }
 
+    // 第一目标 → 第二目标过渡：
+    //   - 未命中碰撞箱：直接瞄第一目标（最近点）。
+    //   - 刚命中碰撞箱：从进盒点按 secondSmooth 平滑过渡到第二目标，
+    //     避免锁到碰撞箱的瞬间突然跳到中心。
+    double tx = picked->firstWx, ty = picked->firstWy, tz = picked->firstWz;
+    if (picked->locked) {
+        if (g_transitionEntity != eid) {
+            g_transitionEntity = eid;
+            g_transitionStartMs = now;
+        }
+        const float durMs = 80.0f + (float)(cfg.secondSmooth - 1) * 80.0f;
+        float k = (float)(now - g_transitionStartMs) / durMs;
+        if (k < 0.0f) k = 0.0f;
+        if (k > 1.0f) k = 1.0f;
+        k = k * k * (3.0f - 2.0f * k);   // smoothstep：起止都柔和
+        tx += (picked->secondWx - picked->firstWx) * (double)k;
+        ty += (picked->secondWy - picked->firstWy) * (double)k;
+        tz += (picked->secondWz - picked->firstWz) * (double)k;
+    } else {
+        g_transitionEntity = -1;
+        g_transitionStartMs = 0;
+    }
+
+    float outSx = 0.f, outSy = 0.f;
+    if (!cam_project(cb, cam.px, cam.py, cam.pz, tx, ty, tz, outSx, outSy) &&
+        !cam_project(cb, cam.px, cam.py, cam.pz,
+                     picked->secondWx, picked->secondWy, picked->secondWz,
+                     outSx, outSy)) {
+        publish_no_target(radiusPx);
+        return;
+    }
+
     AimTarget t;
     t.valid = true;
     t.entityId = eid;
-    t.sx = picked->sx;
-    t.sy = picked->sy;
+    t.sx = outSx;
+    t.sy = outSy;
     t.locked = picked->locked;
     t.fovRadiusPx = radiusPx;
     t.screenW = screenW;
     t.screenH = screenH;
     t.frameMs = now;
+    t.name = ent.name;
+    t.health = ent.health;
+    t.maxHealth = ent.maxHealth;
+    t.healthValid = ent.healthValid;
     publish_target(t);
 }
 
@@ -483,7 +562,6 @@ static DWORD WINAPI aim_thread_entry(LPVOID) {
     const auto period = std::chrono::milliseconds(4);   // 250Hz
     auto next = std::chrono::steady_clock::now();
     AimSession session;
-    bool prevKey = false;
 
     while (!g_stop.load(std::memory_order_acquire)) {
         next += period;
@@ -496,21 +574,15 @@ static DWORD WINAPI aim_thread_entry(LPVOID) {
             st = g_settings;
         }
         const bool menuOpen = g_menuOpen.load(std::memory_order_acquire);
-        const bool key = key_down(st.triggerKey);
         bool trigger = false;
-        if (st.triggerMode == AIM_TRIGGER_TOGGLE) {
-            if (key && !prevKey) g_toggleOn.store(!g_toggleOn.load(std::memory_order_acquire), std::memory_order_release);
-            trigger = g_toggleOn.load(std::memory_order_acquire);
-        } else {
-            switch (st.triggerMode) {
-            case AIM_TRIGGER_HOLD_LMB: trigger = key_down(VK_LBUTTON); break;
-            case AIM_TRIGGER_HOLD_RMB: trigger = key_down(VK_RBUTTON); break;
-            case AIM_TRIGGER_HOLD_KEY: trigger = key; break;
-            case AIM_TRIGGER_ALWAYS:   trigger = true; break;
-            default: trigger = false; break;
-            }
+        switch (st.triggerMode) {
+        case AIM_TRIGGER_HOLD_LMB: trigger = key_down(VK_LBUTTON); break;
+        case AIM_TRIGGER_HOLD_RMB: trigger = key_down(VK_RBUTTON); break;
+        case AIM_TRIGGER_HOLD_KEY: trigger = g_hotkeyDown.load(std::memory_order_acquire); break;
+        case AIM_TRIGGER_TOGGLE:   trigger = g_toggleOn.load(std::memory_order_acquire); break;
+        case AIM_TRIGGER_ALWAYS:   trigger = true; break;
+        default: trigger = false; break;
         }
-        prevKey = key;
 
         const bool allowed = st.enabled && trigger && !menuOpen &&
                              game_focused(g_gameHwnd);

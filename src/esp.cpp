@@ -689,30 +689,38 @@ enum MenuItem {
     MI_AIM_PRIORITY,
     MI_AIM_FOV, MI_AIM_DIST,
     MI_AIM_SMOOTH, MI_AIM_REACTION, MI_AIM_SENS, MI_AIM_PREDICT,
-    MI_AIM_COOLDOWN, MI_AIM_VISIBLE, MI_AIM_VISUAL,
+    MI_AIM_COOLDOWN,
+    MI_AIM_TARGET2, MI_AIM_TARGET2_SMOOTH,
+    MI_AIM_VISIBLE, MI_AIM_VISUAL,
     MI_PROFILE, MI_PROFILE_KEY,
     MI_COUNT
 };
 
-static constexpr int kMenuMaxRows = 16;
+static constexpr int kMenuMaxRows = 18;
 static const int kPageClickItems[kMenuMaxRows] = {
     MI_CLICKER, MI_LEFT, MI_LEFT_CPS, MI_LEFT_PRESET,
     MI_RIGHT, MI_RIGHT_CPS, MI_RIGHT_PRESET,
     MI_KEEP, MI_HOTKEY, -1, -1, -1, -1, -1,
+    -1, -1,
     -1, -1
 };
+
 
 static const int kPageGateItems[kMenuMaxRows] = {
     MI_ATTACK_GATE, MI_ATTACK_KEY, MI_PLACE_GATE, MI_PLACE_KEY,
     MI_CURSOR_GATE, MI_INGAME_GATE, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1,
     -1, -1
 };
+
 
 static const int kPageAdvItems[kMenuMaxRows] = {
     MI_RANDOM, MI_RANDOM_RANGE, MI_HUMAN_MODE, MI_HUMAN_LEVEL,
     MI_CPS_MAX, MI_AUTOSTOP, MI_AUTOSTOP_SEC, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1,
     -1, -1
 };
+
 
 static const int kPageEspItems[kMenuMaxRows] = {
     MI_ESP, MI_ESP_KEY,
@@ -721,8 +729,10 @@ static const int kPageEspItems[kMenuMaxRows] = {
     MI_ESP_NAME, MI_ESP_TRACER,
     MI_ESP_LINE, MI_ESP_DIST,
     MI_ESP_TRAJ, MI_ESP_TRAJ_TICKS,
+    -1, -1,
     -1, -1
 };
+
 
 static const int kPageAimItems[kMenuMaxRows] = {
     MI_AIM, MI_AIM_MODE, MI_AIM_KEY,
@@ -730,17 +740,21 @@ static const int kPageAimItems[kMenuMaxRows] = {
     MI_AIM_PRIORITY,
     MI_AIM_FOV, MI_AIM_DIST,
     MI_AIM_SMOOTH, MI_AIM_REACTION, MI_AIM_SENS, MI_AIM_PREDICT,
-    MI_AIM_COOLDOWN, MI_AIM_VISIBLE, MI_AIM_VISUAL
+    MI_AIM_COOLDOWN,
+    MI_AIM_TARGET2, MI_AIM_TARGET2_SMOOTH,
+    MI_AIM_VISIBLE, MI_AIM_VISUAL
 };
 static const int kPageSysItems[kMenuMaxRows] = {
     MI_PROFILE, MI_PROFILE_KEY, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1,
     -1, -1
 };
+
 
 static const int* kPageItems[PAGE_COUNT] = {
     kPageClickItems, kPageGateItems, kPageAdvItems, kPageEspItems, kPageAimItems, kPageSysItems
 };
-static const int kPageRowCount[PAGE_COUNT] = { 9, 6, 7, 14, 16, 2 };
+static const int kPageRowCount[PAGE_COUNT] = { 9, 6, 7, 14, 18, 2 };
 
 struct MenuItemDef { const wchar_t* label; const wchar_t* tip; };
 static const MenuItemDef kMenuItemDefs[MI_COUNT] = {
@@ -794,6 +808,8 @@ static const MenuItemDef kMenuItemDefs[MI_COUNT] = {
     { L"鼠标灵敏度",   L"自瞄移动倍率，0.5..2.0。游戏灵敏度变化时可微调。" },
     { L"预判 tick",    L"按目标当前速度外推 0..20 tick，0 为不预判。" },
     { L"切换冷却",     L"锁定新目标后此时间内不切换目标，0..2000 毫秒。" },
+    { L"第二目标",     L"命中碰撞箱后的落点：放平中心 / 不放平（第一目标高度中心）/ 保持最近点。" },
+    { L"二段平滑",     L"从第一目标（最近点）过渡到第二目标的平滑度，1 快 10 最缓。" },
     { L"视线检测",     L"开启后墙壁后的目标不会自瞄；关闭可穿墙瞄准。" },
     { L"自瞄显示",     L"0=不显示 1=目标点 2=目标点+瞄准线 3=再显示 FOV 圈。" },
     { L"配置方案",     L"切换整套连点参数方案，4 套方案独立保存。" },
@@ -805,6 +821,7 @@ static const wchar_t* kAimModeNames[AIM_TRIGGER_COUNT] = {
     L"按住左键", L"按住右键", L"按住自瞄键", L"自瞄键切换", L"始终瞄准"
 };
 static const wchar_t* kAimPriorityNames[3] = { L"准星最近", L"距离最近", L"血量最低" };
+static const wchar_t* kAimTarget2Names[AIM_SECOND_COUNT] = { L"放平中心", L"不放平中心", L"保持最近点" };
 static const wchar_t* kAimVisualNames[4] = { L"关闭", L"目标点", L"点+线", L"全部" };
 
 // ---- 菜单缓存与状态 ----
@@ -822,7 +839,7 @@ static std::atomic<DWORD> g_menuHoverStartMs{0};
 static DWORD             g_menuLastRenderMs = 0;
 
 // ---- 右下角状态栏（HUD）离屏缓存 ----
-// 与 ESP 开关解耦：ESP 或连点器任一开启即显示；菜单打开时由菜单页脚代替。
+// 状态栏常态化：进入游戏后常驻显示；菜单打开时由菜单页脚代替。
 // 内容不变时只 memcpy 缓存区域并跳过 present，状态变化时才整帧清屏重画。
 struct StatusBarCache {
     std::vector<uint32_t> px;
@@ -886,7 +903,7 @@ static bool menu_is_slider(int item) {
            item == MI_AIM_FOV || item == MI_AIM_DIST ||
            item == MI_AIM_SMOOTH || item == MI_AIM_REACTION ||
            item == MI_AIM_SENS || item == MI_AIM_PREDICT ||
-           item == MI_AIM_COOLDOWN;
+           item == MI_AIM_COOLDOWN || item == MI_AIM_TARGET2_SMOOTH;
 }
 
 static void menu_slider_rect_local(int panelW, int row, int& x0, int& x1) {
@@ -918,6 +935,7 @@ static float menu_slider_norm(int item, const EspConfig& cfg) {
     case MI_AIM_SENS:     return clamp01((cfg.aim.mouseSensitivity - 0.5f) / 1.5f);
     case MI_AIM_PREDICT:  return clamp01((float)cfg.aim.predictionTicks / 20.0f);
     case MI_AIM_COOLDOWN: return clamp01((float)cfg.aim.switchCooldownMs / 2000.0f);
+    case MI_AIM_TARGET2_SMOOTH: return clamp01((float)(cfg.aim.secondSmooth - 1) / 9.0f);
     default: return 0.0f;
     }
 }
@@ -943,6 +961,7 @@ static void menu_slider_apply(int item, float t, EspConfig& cfg) {
     case MI_AIM_SENS: { float v = 0.5f + t * 1.5f; if (v < 0.5f) v = 0.5f; if (v > 2.0f) v = 2.0f; cfg.aim.mouseSensitivity = v; break; }
     case MI_AIM_PREDICT: { int v = (int)(t * 20.0f + 0.5f); if (v < 0) v = 0; if (v > 20) v = 20; cfg.aim.predictionTicks = v; break; }
     case MI_AIM_COOLDOWN: { int v = (int)(t * 2000.0f + 0.5f); if (v < 0) v = 0; if (v > 2000) v = 2000; cfg.aim.switchCooldownMs = v; break; }
+    case MI_AIM_TARGET2_SMOOTH: { int v = 1 + (int)(t * 9.0f + 0.5f); if (v < 1) v = 1; if (v > 10) v = 10; cfg.aim.secondSmooth = v; break; }
     default: break;
     }
 }
@@ -1078,6 +1097,8 @@ static void menu_adjust(int item, int dir, bool fast) {
     case MI_AIM_SENS: { float step = fast ? 0.1f : 0.05f; float v = cfg.aim.mouseSensitivity + dir * step; if (v < 0.5f) v = 0.5f; if (v > 2.0f) v = 2.0f; cfg.aim.mouseSensitivity = v; break; }
     case MI_AIM_PREDICT: { int step = fast ? 5 : 1; int v = cfg.aim.predictionTicks + dir * step; if (v < 0) v = 0; if (v > 20) v = 20; cfg.aim.predictionTicks = v; break; }
     case MI_AIM_COOLDOWN: { int step = fast ? 200 : 50; int v = cfg.aim.switchCooldownMs + dir * step; if (v < 0) v = 0; if (v > 2000) v = 2000; cfg.aim.switchCooldownMs = v; break; }
+    case MI_AIM_TARGET2: { int v = cfg.aim.secondTarget + dir; if (v < 0) v = AIM_SECOND_COUNT - 1; if (v >= AIM_SECOND_COUNT) v = 0; cfg.aim.secondTarget = v; break; }
+    case MI_AIM_TARGET2_SMOOTH: { int v = cfg.aim.secondSmooth + dir; if (v < 1) v = 1; if (v > 10) v = 10; cfg.aim.secondSmooth = v; break; }
     case MI_AIM_VISIBLE: cfg.aim.visibleOnly = !cfg.aim.visibleOnly; break;
     case MI_AIM_VISUAL: { int v = cfg.aim.visualMode + dir; if (v < 0) v = 3; if (v > 3) v = 0; cfg.aim.visualMode = v; break; }
 
@@ -1124,7 +1145,7 @@ static void menu_activate_item(int item) {
         esp_log("[menu] 等待按下新热键…");
         break;
     case MI_PROFILE: case MI_LEFT_PRESET: case MI_RIGHT_PRESET: case MI_HUMAN_MODE:
-    case MI_AIM_MODE: case MI_AIM_PRIORITY: case MI_AIM_VISUAL:
+    case MI_AIM_MODE: case MI_AIM_PRIORITY: case MI_AIM_TARGET2: case MI_AIM_VISUAL:
         menu_adjust(item, 1, false);
         break;
     default:
@@ -1347,7 +1368,10 @@ static void menu_tooltip_tick() {
 }
 
 static void menu_handle_input(HWND gameHwnd) {
-    if (GetForegroundWindow() != gameHwnd || IsIconic(gameHwnd)) return;
+    if (GetForegroundWindow() != gameHwnd || IsIconic(gameHwnd)) {
+        aimbot_set_hotkey_down(false);   // 失焦/最小化时立刻松开自瞄键
+        return;
+    }
     std::lock_guard<std::mutex> cfgLock(g_clickerCfgMutex);
 
     static bool prevInsert = false, prevUp = false, prevDown = false,
@@ -1384,6 +1408,28 @@ static void menu_handle_input(HWND gameHwnd) {
         }
         return;
     }
+
+    // ---- 自瞄键：由渲染线程热键路径同步到自瞄线程 ----
+    // 后台线程直接轮询 GetAsyncKeyState 在某些全屏/输入法/鼠标侧键场景下会漏键，
+    // 这里复用与 Insert/ESP/F8 完全相同的按键检测路径，保证自瞄快捷键可靠。
+    static bool prevAimKey = false;
+    const bool aimMenuOpen = g_menuVisible.load(std::memory_order_acquire);
+    const bool aimKeyDown = g_cfg.aim.triggerKey != 0 &&
+                            key_down_any(g_cfg.aim.triggerKey);
+    if (!aimMenuOpen && g_cfg.aim.enabled) {
+        if (aimKeyDown && !prevAimKey &&
+            g_cfg.aim.triggerMode == AIM_TRIGGER_TOGGLE) {
+            aimbot_toggle_trigger();
+            const bool on = aimbot_toggle_on();
+            show_toast(on ? L"自瞄已开启" : L"自瞄已关闭", on ? 0x52D88C : 0x9AA7B8);
+            g_menuDirty.store(true, std::memory_order_release);
+        }
+        aimbot_set_hotkey_down(aimKeyDown &&
+                               g_cfg.aim.triggerMode == AIM_TRIGGER_HOLD_KEY);
+    } else {
+        aimbot_set_hotkey_down(false);
+    }
+    prevAimKey = aimKeyDown;
 
     // ---- 方案循环热键：无论菜单是否打开都可用（与 ESP 热键同级）----
     bool profileKeyDown = key_down_any(g_cfg.profileKey);
@@ -1590,6 +1636,8 @@ static void draw_menu_panel(Overlay& ov, int panelW, int panelH, const EspConfig
         case MI_AIM_SENS: swprintf(buf, 128, L"%.2f", cfg.aim.mouseSensitivity); value = buf; color = colAcc; break;
         case MI_AIM_PREDICT: swprintf(buf, 128, L"%d tick", cfg.aim.predictionTicks); value = buf; color = colAcc; break;
         case MI_AIM_COOLDOWN: swprintf(buf, 128, L"%d ms", cfg.aim.switchCooldownMs); value = buf; color = colAcc; break;
+        case MI_AIM_TARGET2: value = kAimTarget2Names[cfg.aim.secondTarget % AIM_SECOND_COUNT]; color = colAcc; break;
+        case MI_AIM_TARGET2_SMOOTH: swprintf(buf, 128, L"%d / 10", cfg.aim.secondSmooth); value = buf; color = colAcc; break;
         case MI_AIM_VISIBLE: value = cfg.aim.visibleOnly ? on : off; color = cfg.aim.visibleOnly ? colOn : colOff; break;
         case MI_AIM_VISUAL: value = kAimVisualNames[cfg.aim.visualMode % 4]; color = colAcc; break;
         }
@@ -1723,17 +1771,23 @@ static void draw_toast(Overlay& ov, int w, int h) {
 
 // ============================================================
 // 右下角状态栏（HUD）
-//   - 与 ESP 开关解耦：ESP 或连点器任一开启就显示；菜单打开时由菜单页脚代替。
+//   - 常态化 HUD：进入游戏后常驻显示；菜单打开时由菜单页脚代替。
 //   - 状态栏离屏缓存：内容不变时只 blit 小区域，整帧不 memset、不 UpdateLayeredWindow。
 //   - 视觉：深色半透明面板 + 左侧强调色 + 彩色圆形指示灯 + 分项分隔线。
 // ============================================================
 static bool status_bar_wanted() {
+    // 状态栏常态化：ESP/连点器/自瞄任一激活，或相机已可用（已进入游戏画面）
+    // 时都显示，不再要求先开启某个模式。
     if (g_espEnabled.load(std::memory_order_acquire)) return true;
-    return clicker_snapshot().running;
+    if (clicker_snapshot().running) return true;
+    if (aimbot_active()) return true;
+    std::lock_guard<std::mutex> lock(g_dataMutex);
+    return g_cam.ok;
 }
 
 static uint64_t status_bar_signature(bool espOn, bool toastActive,
-                                     const ClickerSnapshot& cs, int profile) {
+                                     const ClickerSnapshot& cs, int profile,
+                                     bool aimEnabled, bool aimActive) {
     uint64_t h = 1469598103934665603ULL;   // FNV-1a 64bit
     auto mix = [&](uint64_t v) { h ^= v; h *= 1099511628211ULL; };
     mix(espOn ? 1ULL : 0ULL);
@@ -1745,6 +1799,8 @@ static uint64_t status_bar_signature(bool espOn, bool toastActive,
     mix(cs.canPlace ? 1ULL : 0ULL);
     mix((uint64_t)cs.realtimeCps);
     mix((uint64_t)profile);
+    mix(aimEnabled ? 1ULL : 0ULL);
+    mix(aimActive ? 1ULL : 0ULL);
     return h;
 }
 
@@ -1763,7 +1819,10 @@ static bool status_bar_update(const EspConfig& cfg, bool toastActive) {
     ClickerSnapshot cs = clicker_snapshot();
     bool espOn = g_espEnabled.load(std::memory_order_acquire);
     int profile = g_activeProfileAtomic.load(std::memory_order_acquire);
-    uint64_t sig = status_bar_signature(espOn, toastActive, cs, profile);
+    const bool aimEnabled = cfg.aim.enabled;
+    const bool aimActive = aimbot_active();
+    uint64_t sig = status_bar_signature(espOn, toastActive, cs, profile,
+                                        aimEnabled, aimActive);
 
     const uint32_t colOn    = 0x52D88C;   // 绿
     const uint32_t colOff   = 0x7A8799;   // 灰蓝
@@ -1798,23 +1857,31 @@ static bool status_bar_update(const EspConfig& cfg, bool toastActive) {
         else           { gameVal = L"外"; gameColor = colAmber; }
     }
 
+    std::wstring aimVal = L"关";
+    uint32_t aimColor = colOff;
+    if (aimEnabled) {
+        if (aimActive) { aimVal = L"锁定中"; aimColor = colOn; }
+        else           { aimVal = L"待机";   aimColor = colAmber; }
+    }
+
     swprintf(buf, 64, L"P%d", profile + 1);
-    HudCell cells[6];
+    HudCell cells[7];
     cells[0] = { L"ESP", espOn ? L"开" : L"关", espOn ? colOn : colOff };
     cells[1] = { L"连点", std::move(clickerVal), clickerColor };
-    cells[2] = { L"攻击", gateText(combatShow, cs.canAttack), gateColor(combatShow, cs.canAttack) };
-    cells[3] = { L"放置", gateText(combatShow, cs.canPlace), gateColor(combatShow, cs.canPlace) };
-    cells[4] = { L"游戏", std::move(gameVal), gameColor };
-    cells[5] = { L"方案", buf, colAcc };
+    cells[2] = { L"自瞄", std::move(aimVal), aimColor };
+    cells[3] = { L"攻击", gateText(combatShow, cs.canAttack), gateColor(combatShow, cs.canAttack) };
+    cells[4] = { L"放置", gateText(combatShow, cs.canPlace), gateColor(combatShow, cs.canPlace) };
+    cells[5] = { L"游戏", std::move(gameVal), gameColor };
+    cells[6] = { L"方案", buf, colAcc };
 
-    float labelW[6] = {}, valueW[6] = {};
+    float labelW[7] = {}, valueW[7] = {};
     float contentW = 0.0f;
-    for (int i = 0; i < 6; ++i) {
+    for (int i = 0; i < 7; ++i) {
         labelW[i] = g_overlay.measureText(cells[i].label, kHudFont);
         valueW[i] = g_overlay.measureText(cells[i].value, kHudFont);
         contentW += kHudDotD + kHudDotGap + labelW[i] + kHudLabelGap + valueW[i];
     }
-    float panelW = kHudPadX * 2.0f + contentW + kHudCellGap * 5.0f;
+    float panelW = kHudPadX * 2.0f + contentW + kHudCellGap * 6.0f;
     float panelH = kHudBarH;
     int pw = (int)std::ceil(panelW);
     int ph = (int)std::ceil(panelH);
@@ -1834,7 +1901,9 @@ static bool status_bar_update(const EspConfig& cfg, bool toastActive) {
         memset(g_statusBarCache.px.data(), 0, (size_t)pw * ph * sizeof(uint32_t));
 
         // 面板：半透明深底 + 左侧状态色条 + 1px 描边
-        uint32_t accent = cs.running ? colOn : (espOn ? colAcc : (cfg.colHud & 0xFFFFFF));
+        uint32_t accent = cs.running ? colOn
+                        : (espOn ? colAcc
+                                 : (aimActive ? colAcc : (cfg.colHud & 0xFFFFFF)));
         g_overlay.fillRectAlpha(0.0f, 0.0f, panelW, panelH, 0x0C1118, 0.86f);
         g_overlay.fillRectAlpha(0.0f, 0.0f, 2.0f, panelH, accent, 0.90f);
         g_overlay.fillRectAlpha(0.0f, 0.0f, panelW, 1.0f, 0x3A4C63, 0.90f);
@@ -1846,7 +1915,7 @@ static bool status_bar_update(const EspConfig& cfg, bool toastActive) {
         float x = kHudPadX;
         const float cy = panelH * 0.5f;
         const float ty = (panelH - 20.0f) * 0.5f;   // 13px 文本位图约 20px 高，垂直居中
-        for (int i = 0; i < 6; ++i) {
+        for (int i = 0; i < 7; ++i) {
             const float dotX = x + kHudDotD * 0.5f;
             g_overlay.fillCircle(dotX, cy, 3.4f, 0x111A26);        // 深色外圈
             g_overlay.fillCircle(dotX, cy, 2.1f, cells[i].color);  // 状态色灯芯
@@ -1855,7 +1924,7 @@ static bool status_bar_update(const EspConfig& cfg, bool toastActive) {
             const float vx = lx + labelW[i] + kHudLabelGap;
             g_overlay.drawText(vx, ty, cells[i].value, cells[i].color, kHudFont);
             x = vx + valueW[i];
-            if (i < 5) {
+            if (i < 6) {
                 const float dx = x + kHudCellGap * 0.5f;
                 g_overlay.drawLine(dx, 7.0f, dx, panelH - 7.0f, 0x273449, 1);
                 x += kHudCellGap;
@@ -1932,8 +2001,21 @@ static void draw_aim_visual(Overlay& ov, int w, int h, const EspConfig& cfg) {
         ov.fillCircle(t.sx, t.sy, 2.0f, 0x0A0F14);
         ov.fillCircle(t.sx, t.sy, 1.0f, col);
     }
-    if (cfg.aim.visualMode >= 2)
+    if (cfg.aim.visualMode >= 2) {
         ov.drawLine(cx, cy, t.sx, t.sy, col, 1);
+        if (!t.name.empty()) {
+            float tw = ov.measureText(t.name, 13);
+            ov.drawText(t.sx - tw * 0.5f, t.sy - 24.0f, t.name, 0xE7EFFB, 13);
+        }
+        if (t.healthValid) {
+            wchar_t hp[24];
+            const int pct = (int)(t.health / std::max(1.0f, t.maxHealth) * 100.0f + 0.5f);
+            swprintf(hp, 24, L"%d%%", pct);
+            float tw = ov.measureText(hp, 12);
+            ov.drawText(t.sx - tw * 0.5f, t.sy + 14.0f, hp,
+                        t.health > 0.0f ? 0x52D88C : 0xFF6B6B, 12);
+        }
+    }
 }
 
 // ESP 仍逐帧重绘；菜单/状态栏使用离屏缓存，静态时只 memcpy 对应区域。
@@ -1954,7 +2036,7 @@ static void esp_draw_overlay(const EspConfig& cfg) {
     bool espOn = g_espEnabled.load(std::memory_order_acquire);
     bool menuOpen = g_menuVisible.load(std::memory_order_acquire);
     bool toastActive = toast_active();
-    // 状态栏与 ESP 开关解耦；菜单打开时由菜单页脚显示状态，不再叠画 HUD。
+    // 状态栏常态化：进入游戏后常驻；菜单打开时由菜单页脚显示状态，不再叠画 HUD。
     bool statusOn = !menuOpen && status_bar_wanted();
     bool aimVisual = !menuOpen && aimbot_visual_wanted();
     if (!espOn && !menuOpen && !toastActive && !statusOn && !aimVisual) return;
@@ -2057,7 +2139,7 @@ void esp_on_swap() {
     bool enabled = g_espEnabled.load(std::memory_order_acquire);
     bool menuOpen = g_menuVisible.load(std::memory_order_acquire);
     bool toastActive = toast_active();
-    // 状态栏与 ESP 解耦：ESP 或连点器任一开启都显示；连点器运行时需要相机与门控状态。
+    // 状态栏常态化：进入游戏后常驻；连点器运行时需要相机与门控状态。
     bool statusOn = status_bar_wanted();
     // 自瞄触发中：即使 ESP 关闭也要采集实体并计算目标点。
     bool aimActive = aimbot_active();

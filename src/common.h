@@ -77,6 +77,13 @@ enum AimPriority {
     AIM_PRIORITY_HEALTH         // 优先血量最低的目标
 };
 
+enum AimSecondTarget {
+    AIM_SECOND_LEVEL = 0,       // 放平：本地玩家视平线高度的水平中心
+    AIM_SECOND_FIRST_HEIGHT,    // 不放平：第一目标点高度的水平中心
+    AIM_SECOND_KEEP_NEAREST,    // 不切换：一直保持最近点
+    AIM_SECOND_COUNT
+};
+
 struct AimSettings {
     bool    enabled          = false;       // 自瞄总开关（默认关闭）
     int     triggerMode      = AIM_TRIGGER_HOLD_LMB;   // 触发模式
@@ -92,6 +99,8 @@ struct AimSettings {
     float   mouseSensitivity = 1.0f;        // 鼠标移动倍率 0.5..2.0
     int     predictionTicks  = 0;           // 预判目标移动 tick 数 0..20
     int     switchCooldownMs = 300;         // 切换目标冷却（毫秒）
+    int     secondTarget     = AIM_SECOND_LEVEL;   // 第二目标模式（命中碰撞箱后）
+    int     secondSmooth     = 5;           // 第一目标 → 第二目标的过渡平滑度 1..10
     int     visualMode       = 3;           // 0=不显示 1=目标点 2=+瞄准线 3=+FOV 圈
     bool    visibleOnly      = true;        // 仅瞄准视线可达目标（墙壁后不瞄）
 };

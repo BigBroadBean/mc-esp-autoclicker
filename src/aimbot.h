@@ -26,6 +26,10 @@ struct AimTarget {
     float   fovRadiusPx = 0.0f;     // 自瞄 FOV 圈半径（用于绘制）
     int     screenW = 0, screenH = 0;
     DWORD   frameMs = 0;            // 发布时刻（GetTickCount）
+    // 可视化附加信息
+    std::wstring name;              // 目标名字
+    float   health = 0.0f, maxHealth = 1.0f;
+    bool    healthValid = false;
 };
 
 void aimbot_apply_settings(const AimSettings& s);
@@ -38,6 +42,11 @@ bool aimbot_active();
 bool aimbot_visual_wanted();
 
 void aimbot_set_menu_open(bool open);
+
+// 由渲染线程热键路径同步触发状态（比后台线程轮询 GetAsyncKeyState 更可靠）。
+void aimbot_set_hotkey_down(bool down);
+void aimbot_toggle_trigger();
+bool aimbot_toggle_on();
 
 // 游戏渲染线程每帧调用：选择目标并计算屏幕瞄准点。
 void aimbot_update_target(const CamData& cam, int screenW, int screenH,

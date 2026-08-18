@@ -148,6 +148,10 @@ static void clamp_aim_settings(AimSettings& a) {
     if (a.predictionTicks > 20) a.predictionTicks = 20;
     if (a.switchCooldownMs < 0) a.switchCooldownMs = 0;
     if (a.switchCooldownMs > 2000) a.switchCooldownMs = 2000;
+    if (a.secondTarget < 0) a.secondTarget = 0;
+    if (a.secondTarget >= AIM_SECOND_COUNT) a.secondTarget = AIM_SECOND_LEVEL;
+    if (a.secondSmooth < 1) a.secondSmooth = 1;
+    if (a.secondSmooth > 10) a.secondSmooth = 10;
     if (a.visualMode < 0) a.visualMode = 0;
     if (a.visualMode > 3) a.visualMode = 3;
 }
@@ -246,6 +250,8 @@ void config_load(EspConfig& cfg) {
                 else if (key == "mouseSensitivity" || key == "sensitivity") setf(cfg.aim.mouseSensitivity);
                 else if (key == "predictionTicks") seti(cfg.aim.predictionTicks);
                 else if (key == "switchCooldownMs") seti(cfg.aim.switchCooldownMs);
+                else if (key == "secondTarget") seti(cfg.aim.secondTarget);
+                else if (key == "secondSmooth") seti(cfg.aim.secondSmooth);
                 else if (key == "visualMode") seti(cfg.aim.visualMode);
                 else if (key == "visibleOnly") set(cfg.aim.visibleOnly);
             } else if (section == "clicker" || section.rfind("clickerProfile", 0) == 0) {
@@ -395,6 +401,8 @@ void config_save(const EspConfig& cfg) {
     line((std::string("mouseSensitivity = ") + std::to_string(cfg.aim.mouseSensitivity) + "          ; 鼠标移动倍率 0.5..2.0").c_str());
     line((std::string("predictionTicks = ") + std::to_string(cfg.aim.predictionTicks) + "          ; 预判目标移动 0..20 tick").c_str());
     line((std::string("switchCooldownMs = ") + std::to_string(cfg.aim.switchCooldownMs) + "        ; 切换目标冷却（毫秒）").c_str());
+    line((std::string("secondTarget = ") + std::to_string(cfg.aim.secondTarget) + "           ; 0=放平中心 1=不放平(第一目标高度) 2=保持最近点").c_str());
+    line((std::string("secondSmooth = ") + std::to_string(cfg.aim.secondSmooth) + "           ; 第一目标→第二目标过渡平滑度 1..10").c_str());
     line((std::string("visualMode = ") + std::to_string(cfg.aim.visualMode) + "              ; 0=关 1=目标点 2=+瞄准线 3=+FOV 圈").c_str());
     line((std::string("visibleOnly = ") + b2s(cfg.aim.visibleOnly) + "           ; 仅瞄准视线可达目标").c_str());
 
