@@ -690,36 +690,42 @@ enum MenuItem {
     MI_AIM_FOV, MI_AIM_DIST,
     MI_AIM_SMOOTH, MI_AIM_REACTION, MI_AIM_SENS, MI_AIM_PREDICT,
     MI_AIM_COOLDOWN,
-    MI_AIM_TARGET2, MI_AIM_TARGET2_SMOOTH,
+    MI_AIM_TARGET2, MI_AIM_TARGET2_SMOOTH, MI_AIM_STABILITY,
     MI_AIM_VISIBLE, MI_AIM_VISUAL,
     MI_PROFILE, MI_PROFILE_KEY,
     MI_COUNT
 };
 
-static constexpr int kMenuMaxRows = 18;
+static constexpr int kMenuMaxRows = 19;
 static const int kPageClickItems[kMenuMaxRows] = {
     MI_CLICKER, MI_LEFT, MI_LEFT_CPS, MI_LEFT_PRESET,
     MI_RIGHT, MI_RIGHT_CPS, MI_RIGHT_PRESET,
     MI_KEEP, MI_HOTKEY, -1, -1, -1, -1, -1,
     -1, -1,
-    -1, -1
+    -1, -1,
+    -1
 };
+
 
 
 static const int kPageGateItems[kMenuMaxRows] = {
     MI_ATTACK_GATE, MI_ATTACK_KEY, MI_PLACE_GATE, MI_PLACE_KEY,
     MI_CURSOR_GATE, MI_INGAME_GATE, -1, -1, -1, -1, -1, -1, -1, -1,
     -1, -1,
-    -1, -1
+    -1, -1,
+    -1
 };
+
 
 
 static const int kPageAdvItems[kMenuMaxRows] = {
     MI_RANDOM, MI_RANDOM_RANGE, MI_HUMAN_MODE, MI_HUMAN_LEVEL,
     MI_CPS_MAX, MI_AUTOSTOP, MI_AUTOSTOP_SEC, -1, -1, -1, -1, -1, -1, -1,
     -1, -1,
-    -1, -1
+    -1, -1,
+    -1
 };
+
 
 
 static const int kPageEspItems[kMenuMaxRows] = {
@@ -730,8 +736,10 @@ static const int kPageEspItems[kMenuMaxRows] = {
     MI_ESP_LINE, MI_ESP_DIST,
     MI_ESP_TRAJ, MI_ESP_TRAJ_TICKS,
     -1, -1,
-    -1, -1
+    -1, -1,
+    -1
 };
+
 
 
 static const int kPageAimItems[kMenuMaxRows] = {
@@ -741,20 +749,22 @@ static const int kPageAimItems[kMenuMaxRows] = {
     MI_AIM_FOV, MI_AIM_DIST,
     MI_AIM_SMOOTH, MI_AIM_REACTION, MI_AIM_SENS, MI_AIM_PREDICT,
     MI_AIM_COOLDOWN,
-    MI_AIM_TARGET2, MI_AIM_TARGET2_SMOOTH,
+    MI_AIM_TARGET2, MI_AIM_TARGET2_SMOOTH, MI_AIM_STABILITY,
     MI_AIM_VISIBLE, MI_AIM_VISUAL
 };
 static const int kPageSysItems[kMenuMaxRows] = {
     MI_PROFILE, MI_PROFILE_KEY, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
     -1, -1,
-    -1, -1
+    -1, -1,
+    -1
 };
+
 
 
 static const int* kPageItems[PAGE_COUNT] = {
     kPageClickItems, kPageGateItems, kPageAdvItems, kPageEspItems, kPageAimItems, kPageSysItems
 };
-static const int kPageRowCount[PAGE_COUNT] = { 9, 6, 7, 14, 18, 2 };
+static const int kPageRowCount[PAGE_COUNT] = { 9, 6, 7, 14, 19, 2 };
 
 struct MenuItemDef { const wchar_t* label; const wchar_t* tip; };
 static const MenuItemDef kMenuItemDefs[MI_COUNT] = {
@@ -810,6 +820,7 @@ static const MenuItemDef kMenuItemDefs[MI_COUNT] = {
     { L"切换冷却",     L"锁定新目标后此时间内不切换目标，0..2000 毫秒。" },
     { L"第二目标",     L"命中碰撞箱后的落点：放平中心 / 不放平（第一目标高度中心）/ 保持最近点。" },
     { L"二段平滑",     L"从第一目标（最近点）过渡到第二目标的平滑度，1 快 10 最缓。" },
+    { L"稳定度",       L"对齐第二目标后，目标只移动此像素范围内就不再移动鼠标，0..30。" },
     { L"视线检测",     L"开启后墙壁后的目标不会自瞄；关闭可穿墙瞄准。" },
     { L"自瞄显示",     L"0=不显示 1=目标点 2=目标点+瞄准线 3=再显示 FOV 圈。" },
     { L"配置方案",     L"切换整套连点参数方案，4 套方案独立保存。" },
@@ -903,7 +914,8 @@ static bool menu_is_slider(int item) {
            item == MI_AIM_FOV || item == MI_AIM_DIST ||
            item == MI_AIM_SMOOTH || item == MI_AIM_REACTION ||
            item == MI_AIM_SENS || item == MI_AIM_PREDICT ||
-           item == MI_AIM_COOLDOWN || item == MI_AIM_TARGET2_SMOOTH;
+           item == MI_AIM_COOLDOWN || item == MI_AIM_TARGET2_SMOOTH ||
+           item == MI_AIM_STABILITY;
 }
 
 static void menu_slider_rect_local(int panelW, int row, int& x0, int& x1) {
@@ -936,6 +948,7 @@ static float menu_slider_norm(int item, const EspConfig& cfg) {
     case MI_AIM_PREDICT:  return clamp01((float)cfg.aim.predictionTicks / 20.0f);
     case MI_AIM_COOLDOWN: return clamp01((float)cfg.aim.switchCooldownMs / 2000.0f);
     case MI_AIM_TARGET2_SMOOTH: return clamp01((float)(cfg.aim.secondSmooth - 1) / 9.0f);
+    case MI_AIM_STABILITY: return clamp01((float)cfg.aim.stability / 30.0f);
     default: return 0.0f;
     }
 }
@@ -962,6 +975,7 @@ static void menu_slider_apply(int item, float t, EspConfig& cfg) {
     case MI_AIM_PREDICT: { int v = (int)(t * 20.0f + 0.5f); if (v < 0) v = 0; if (v > 20) v = 20; cfg.aim.predictionTicks = v; break; }
     case MI_AIM_COOLDOWN: { int v = (int)(t * 2000.0f + 0.5f); if (v < 0) v = 0; if (v > 2000) v = 2000; cfg.aim.switchCooldownMs = v; break; }
     case MI_AIM_TARGET2_SMOOTH: { int v = 1 + (int)(t * 9.0f + 0.5f); if (v < 1) v = 1; if (v > 10) v = 10; cfg.aim.secondSmooth = v; break; }
+    case MI_AIM_STABILITY: { int v = (int)(t * 30.0f + 0.5f); if (v < 0) v = 0; if (v > 30) v = 30; cfg.aim.stability = v; break; }
     default: break;
     }
 }
@@ -1099,6 +1113,7 @@ static void menu_adjust(int item, int dir, bool fast) {
     case MI_AIM_COOLDOWN: { int step = fast ? 200 : 50; int v = cfg.aim.switchCooldownMs + dir * step; if (v < 0) v = 0; if (v > 2000) v = 2000; cfg.aim.switchCooldownMs = v; break; }
     case MI_AIM_TARGET2: { int v = cfg.aim.secondTarget + dir; if (v < 0) v = AIM_SECOND_COUNT - 1; if (v >= AIM_SECOND_COUNT) v = 0; cfg.aim.secondTarget = v; break; }
     case MI_AIM_TARGET2_SMOOTH: { int v = cfg.aim.secondSmooth + dir; if (v < 1) v = 1; if (v > 10) v = 10; cfg.aim.secondSmooth = v; break; }
+    case MI_AIM_STABILITY: { int step = fast ? 5 : 1; int v = cfg.aim.stability + dir * step; if (v < 0) v = 0; if (v > 30) v = 30; cfg.aim.stability = v; break; }
     case MI_AIM_VISIBLE: cfg.aim.visibleOnly = !cfg.aim.visibleOnly; break;
     case MI_AIM_VISUAL: { int v = cfg.aim.visualMode + dir; if (v < 0) v = 3; if (v > 3) v = 0; cfg.aim.visualMode = v; break; }
 
@@ -1367,8 +1382,21 @@ static void menu_tooltip_tick() {
     }
 }
 
+static bool game_focused_for_input(HWND gameHwnd) {
+    if (!gameHwnd) return false;
+    HWND fg = GetForegroundWindow();
+    if (fg == gameHwnd) return true;
+    if (fg) {
+        DWORD fgPid = 0, gamePid = 0;
+        GetWindowThreadProcessId(fg, &fgPid);
+        GetWindowThreadProcessId(gameHwnd, &gamePid);
+        if (fgPid == gamePid && gamePid != 0) return true;   // 同进程其它窗口兜底
+    }
+    return false;
+}
+
 static void menu_handle_input(HWND gameHwnd) {
-    if (GetForegroundWindow() != gameHwnd || IsIconic(gameHwnd)) {
+    if (!game_focused_for_input(gameHwnd) || IsIconic(gameHwnd)) {
         aimbot_set_hotkey_down(false);   // 失焦/最小化时立刻松开自瞄键
         return;
     }
@@ -1416,19 +1444,42 @@ static void menu_handle_input(HWND gameHwnd) {
     const bool aimMenuOpen = g_menuVisible.load(std::memory_order_acquire);
     const bool aimKeyDown = g_cfg.aim.triggerKey != 0 &&
                             key_down_any(g_cfg.aim.triggerKey);
-    if (!aimMenuOpen && g_cfg.aim.enabled) {
-        if (aimKeyDown && !prevAimKey &&
-            g_cfg.aim.triggerMode == AIM_TRIGGER_TOGGLE) {
-            aimbot_toggle_trigger();
-            const bool on = aimbot_toggle_on();
-            show_toast(on ? L"自瞄已开启" : L"自瞄已关闭", on ? 0x52D88C : 0x9AA7B8);
+    const bool aimKeyEdge = aimKeyDown && !prevAimKey;
+    if (aimKeyEdge)
+        esp_log("[aim] 热键按下 vk=%d mode=%d enabled=%d menu=%d",
+                g_cfg.aim.triggerKey, g_cfg.aim.triggerMode,
+                g_cfg.aim.enabled ? 1 : 0, aimMenuOpen ? 1 : 0);
+
+    bool aimAutoEnabled = false;
+    if (!aimMenuOpen && aimKeyEdge && !g_cfg.aim.enabled &&
+        (g_cfg.aim.triggerMode == AIM_TRIGGER_HOLD_KEY ||
+         g_cfg.aim.triggerMode == AIM_TRIGGER_TOGGLE)) {
+        // 自瞄总开关忘记打开时，按快捷键第一次按下会自动启用。
+        g_cfg.aim.enabled = true;
+        aimAutoEnabled = true;
+    }
+
+    if (!aimMenuOpen && aimKeyEdge &&
+        g_cfg.aim.triggerMode == AIM_TRIGGER_TOGGLE) {
+        aimbot_toggle_trigger();
+        const bool on = aimbot_toggle_on();
+        show_toast(on ? L"自瞄已开启" : L"自瞄已关闭", on ? 0x52D88C : 0x9AA7B8);
+        if (aimAutoEnabled) {
+            commit_config();
+            aimAutoEnabled = false;
+        } else {
             g_menuDirty.store(true, std::memory_order_release);
         }
-        aimbot_set_hotkey_down(aimKeyDown &&
-                               g_cfg.aim.triggerMode == AIM_TRIGGER_HOLD_KEY);
-    } else {
-        aimbot_set_hotkey_down(false);
     }
+
+    if (aimAutoEnabled) {
+        commit_config();
+        show_toast(L"自瞄已启用（按住自瞄键）", 0x52D88C);
+    }
+
+    aimbot_set_hotkey_down(!aimMenuOpen && aimKeyDown &&
+                           g_cfg.aim.enabled &&
+                           g_cfg.aim.triggerMode == AIM_TRIGGER_HOLD_KEY);
     prevAimKey = aimKeyDown;
 
     // ---- 方案循环热键：无论菜单是否打开都可用（与 ESP 热键同级）----
@@ -1638,6 +1689,7 @@ static void draw_menu_panel(Overlay& ov, int panelW, int panelH, const EspConfig
         case MI_AIM_COOLDOWN: swprintf(buf, 128, L"%d ms", cfg.aim.switchCooldownMs); value = buf; color = colAcc; break;
         case MI_AIM_TARGET2: value = kAimTarget2Names[cfg.aim.secondTarget % AIM_SECOND_COUNT]; color = colAcc; break;
         case MI_AIM_TARGET2_SMOOTH: swprintf(buf, 128, L"%d / 10", cfg.aim.secondSmooth); value = buf; color = colAcc; break;
+        case MI_AIM_STABILITY: swprintf(buf, 128, L"%d px", cfg.aim.stability); value = buf; color = colAcc; break;
         case MI_AIM_VISIBLE: value = cfg.aim.visibleOnly ? on : off; color = cfg.aim.visibleOnly ? colOn : colOff; break;
         case MI_AIM_VISUAL: value = kAimVisualNames[cfg.aim.visualMode % 4]; color = colAcc; break;
         }

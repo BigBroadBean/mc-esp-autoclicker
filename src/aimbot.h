@@ -23,6 +23,7 @@ struct AimTarget {
     int     entityId = -1;
     float   sx = 0.0f, sy = 0.0f;   // 目标应移动到的屏幕点（游戏客户区坐标）
     bool    locked = false;         // 准星当前是否已在目标碰撞箱内
+    float   secondProgress = 0.0f;  // 第一目标→第二目标过渡进度（0..1，未锁定时为 0）
     float   fovRadiusPx = 0.0f;     // 自瞄 FOV 圈半径（用于绘制）
     int     screenW = 0, screenH = 0;
     DWORD   frameMs = 0;            // 发布时刻（GetTickCount）
@@ -46,6 +47,7 @@ void aimbot_set_menu_open(bool open);
 // 由渲染线程热键路径同步触发状态（比后台线程轮询 GetAsyncKeyState 更可靠）。
 void aimbot_set_hotkey_down(bool down);
 void aimbot_toggle_trigger();
+void aimbot_set_toggle_on(bool on);
 bool aimbot_toggle_on();
 
 // 游戏渲染线程每帧调用：选择目标并计算屏幕瞄准点。

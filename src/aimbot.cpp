@@ -60,6 +60,8 @@ static void clamp_settings(AimSettings& a) {
     if (a.secondTarget >= AIM_SECOND_COUNT) a.secondTarget = AIM_SECOND_LEVEL;
     if (a.secondSmooth < 1) a.secondSmooth = 1;
     if (a.secondSmooth > 10) a.secondSmooth = 10;
+    if (a.stability < 0) a.stability = 0;
+    if (a.stability > 30) a.stability = 30;
     if (a.visualMode < 0) a.visualMode = 0;
     if (a.visualMode > 3) a.visualMode = 3;
 }
@@ -103,7 +105,13 @@ void aimbot_set_hotkey_down(bool down) {
 }
 
 void aimbot_toggle_trigger() {
-    g_toggleOn.store(!g_toggleOn.load(std::memory_order_acquire), std::memory_order_release);
+    const bool next = !g_toggleOn.load(std::memory_order_acquire);
+    aimbot_set_toggle_on(next);
+}
+
+void aimbot_set_toggle_on(bool on) {
+    g_toggleOn.store(on, std::memory_order_release);
+    esp_log("[aim] 切换状态 -> %s", on ? "开" : "关");
 }
 
 bool aimbot_toggle_on() {
@@ -422,6 +430,16 @@ void aimbot_update_target(const CamData& cam, int screenW, int screenH,
     t.sx = outSx;
     t.sy = outSy;
     t.locked = picked->locked;
+    t.secondProgress = picked->locked ? ((cfg.secondTarget == AIM_SECOND_KEEP_NEAREST)
+                                         ? 1.0f : 0.0f) : 0.0f;
+    if (picked->locked && cfg.secondTarget != AIM_SECOND_KEEP_NEAREST) {
+        const float durMs = 80.0f + (float)(cfg.secondSmooth - 1) * 80.0f;
+        float p = (float)(now - g_transitionStartMs) / durMs;
+        if (p < 0.0f) p = 0.0f;
+        if (p > 1.0f) p = 1.0f;
+        p = p * p * (3.0f - 2.0f * p);
+        t.secondProgress = p;
+    }
     t.fovRadiusPx = radiusPx;
     t.screenW = screenW;
     t.screenH = screenH;
@@ -449,6 +467,8 @@ static bool game_focused(HWND gameHwnd) {
         GetWindowThreadProcessId(fg, &fgPid);
         GetWindowThreadProcessId(gameHwnd, &gamePid);
         if (fgPid == gamePid && gamePid != 0) return true;   // 同进程其它窗口兜底
+    } else if (IsWindowVisible(gameHwnd) && !IsIconic(gameHwnd)) {
+        return true;   // 独占全屏等场景 GetForegroundWindow 可能为 NULL
     }
     return false;
 }
@@ -467,6 +487,9 @@ struct AimSession {
     DWORD  pauseUntil = 0;
     float  lastDx = 0.f, lastDy = 0.f;
     bool   started = false;
+    // 稳定度：第一次对齐第二目标后记录锚点，目标只移动一点点时不再动鼠标。
+    bool   stableSet = false;
+    float  stableSx = 0.f, stableSy = 0.f;
 };
 
 static void aim_session_reset(AimSession& s) {
@@ -488,6 +511,7 @@ static void process_aim_mouse(const AimSettings& st, const AimTarget& t, AimSess
         const float jump = std::sqrt((dx - s.lastDx) * (dx - s.lastDx) +
                                      (dy - s.lastDy) * (dy - s.lastDy));
         s.entityId = t.entityId;
+        s.stableSet = false;   // 换目标后重新建立稳定锚点
         if (jump > 90.0f) {   // 新目标画面位置突变：重新开始反应/加速过程
             s.startMs = now;
         }
@@ -499,6 +523,29 @@ static void process_aim_mouse(const AimSettings& st, const AimTarget& t, AimSess
     }
     s.lastDx = dx;
     s.lastDy = dy;
+
+    // 稳定度：仅当已经完成第一→第二目标过渡（secondProgress≈1）时生效。
+    if (t.locked && t.secondProgress >= 1.0f) {
+        if (!s.stableSet) {
+            if (dist <= 1.5f) {   // 已真正对齐第二目标：记录稳定锚点
+                s.stableSet = true;
+                s.stableSx = t.sx;
+                s.stableSy = t.sy;
+                return;
+            }
+        } else {
+            const float mdx = t.sx - s.stableSx;
+            const float mdy = t.sy - s.stableSy;
+            const float moved = std::sqrt(mdx * mdx + mdy * mdy);
+            if (moved <= (float)st.stability) {
+                return;   // 目标只变了一点点：保持不动
+            }
+            // 变化超过死区：解除稳定，正常追一次，追上后重新落锚。
+            s.stableSet = false;
+        }
+    } else {
+        s.stableSet = false;
+    }
 
     if (s.pauseUntil > now) return;
 
@@ -586,6 +633,15 @@ static DWORD WINAPI aim_thread_entry(LPVOID) {
 
         const bool allowed = st.enabled && trigger && !menuOpen &&
                              game_focused(g_gameHwnd);
+        {
+            static bool lastAllowed = false;
+            if (allowed != lastAllowed) {
+                lastAllowed = allowed;
+                esp_log("[aim] 自瞄激活状态 -> %s (mode=%d keyDown=%d)",
+                        allowed ? "开" : "关", st.triggerMode,
+                        g_hotkeyDown.load(std::memory_order_acquire) ? 1 : 0);
+            }
+        }
         g_active.store(allowed, std::memory_order_release);
 
         if (allowed) {

@@ -101,6 +101,7 @@ struct AimSettings {
     int     switchCooldownMs = 300;         // 切换目标冷却（毫秒）
     int     secondTarget     = AIM_SECOND_LEVEL;   // 第二目标模式（命中碰撞箱后）
     int     secondSmooth     = 5;           // 第一目标 → 第二目标的过渡平滑度 1..10
+    int     stability        = 8;           // 对齐第二目标后的微小移动死区（像素）0..30
     int     visualMode       = 3;           // 0=不显示 1=目标点 2=+瞄准线 3=+FOV 圈
     bool    visibleOnly      = true;        // 仅瞄准视线可达目标（墙壁后不瞄）
 };
