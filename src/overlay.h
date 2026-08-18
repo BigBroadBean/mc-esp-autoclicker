@@ -58,6 +58,8 @@ public:
     // 填充凸/凹多边形（n 个顶点），50% 半透明（source-over 预乘 alpha）。
     // 用于 3D 落点方块 6 个面的平面渲染。
     void fillPoly(const float* xs, const float* ys, int n, uint32_t rgb, float alpha);
+    // 抗锯齿实心圆（状态指示灯用）。
+    void fillCircle(float cx, float cy, float r, uint32_t rgb);
     void drawText(float x, float y, const std::wstring& text, uint32_t rgb, int px);
     float measureText(const std::wstring& text, int px);
 

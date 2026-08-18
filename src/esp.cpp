@@ -774,6 +774,17 @@ static std::atomic<int>  g_menuDrag{-1};       // 当前页内行号
 static std::atomic<DWORD> g_menuHoverStartMs{0};
 static DWORD             g_menuLastRenderMs = 0;
 
+// ---- 右下角状态栏（HUD）离屏缓存 ----
+// 与 ESP 开关解耦：ESP 或连点器任一开启即显示；菜单打开时由菜单页脚代替。
+// 内容不变时只 memcpy 缓存区域并跳过 present，状态变化时才整帧清屏重画。
+struct StatusBarCache {
+    std::vector<uint32_t> px;
+    int w = 0, h = 0;
+    uint64_t sig = 0;
+    bool valid = false;
+};
+static StatusBarCache g_statusBarCache;   // 只由游戏渲染线程访问
+
 static constexpr int kMenuRowH = 17;
 static constexpr int kMenuHeaderH = 24;
 static constexpr int kMenuTabH = 22;
@@ -1605,8 +1616,184 @@ static void draw_toast(Overlay& ov, int w, int h) {
     ov.drawText(x + 14.0f, y + 8.0f, text, 0xE7EFFB, 14);
 }
 
+// ============================================================
+// 右下角状态栏（HUD）
+//   - 与 ESP 开关解耦：ESP 或连点器任一开启就显示；菜单打开时由菜单页脚代替。
+//   - 状态栏离屏缓存：内容不变时只 blit 小区域，整帧不 memset、不 UpdateLayeredWindow。
+//   - 视觉：深色半透明面板 + 左侧强调色 + 彩色圆形指示灯 + 分项分隔线。
+// ============================================================
+static bool status_bar_wanted() {
+    if (g_espEnabled.load(std::memory_order_acquire)) return true;
+    return clicker_snapshot().running;
+}
+
+static uint64_t status_bar_signature(bool espOn, bool toastActive,
+                                     const ClickerSnapshot& cs, int profile) {
+    uint64_t h = 1469598103934665603ULL;   // FNV-1a 64bit
+    auto mix = [&](uint64_t v) { h ^= v; h *= 1099511628211ULL; };
+    mix(espOn ? 1ULL : 0ULL);
+    mix(toastActive ? 1ULL : 0ULL);
+    mix(cs.running ? 1ULL : 0ULL);
+    mix(cs.combatReady ? 1ULL : 0ULL);
+    mix(cs.inGame ? 1ULL : 0ULL);
+    mix(cs.canAttack ? 1ULL : 0ULL);
+    mix(cs.canPlace ? 1ULL : 0ULL);
+    mix((uint64_t)cs.realtimeCps);
+    mix((uint64_t)profile);
+    return h;
+}
+
+static constexpr float kHudBarH      = 26.0f;
+static constexpr float kHudPadX      = 10.0f;
+static constexpr float kHudDotD      = 6.0f;    // 指示灯直径
+static constexpr float kHudDotGap    = 4.0f;    // 灯与标签间距
+static constexpr float kHudLabelGap  = 6.0f;    // 标签与值间距
+static constexpr float kHudCellGap   = 12.0f;   // 两个分项之间（中间画分隔线）
+static constexpr int   kHudFont      = 13;
+
+struct HudCell { std::wstring label; std::wstring value; uint32_t color; };
+
+// 返回 true 表示状态栏内容已重画（调用方需清屏一次并 present）。
+static bool status_bar_update(const EspConfig& cfg, bool toastActive) {
+    ClickerSnapshot cs = clicker_snapshot();
+    bool espOn = g_espEnabled.load(std::memory_order_acquire);
+    int profile = g_activeProfileAtomic.load(std::memory_order_acquire);
+    uint64_t sig = status_bar_signature(espOn, toastActive, cs, profile);
+
+    const uint32_t colOn    = 0x52D88C;   // 绿
+    const uint32_t colOff   = 0x7A8799;   // 灰蓝
+    const uint32_t colNo    = 0xFF6B6B;   // 红（不可攻击/不可放置）
+    const uint32_t colAmber = 0xFFB454;   // 琥珀（游戏外）
+    const uint32_t colDim   = 0x5A6575;   // 未就绪
+    const uint32_t colAcc   = 0x66A3FF;   // 蓝（方案）
+
+    wchar_t buf[64];
+    std::wstring clickerVal = L"关";
+    uint32_t clickerColor = colOff;
+    if (cs.running) {
+        swprintf(buf, 64, L"开·%d CPS", cs.realtimeCps);
+        clickerVal = buf;
+        clickerColor = colOn;
+    }
+
+    auto gateText = [&](bool ready, bool ok) -> const wchar_t* {
+        if (!ready) return L"—";
+        return ok ? L"可" : L"否";
+    };
+    auto gateColor = [&](bool ready, bool ok) {
+        if (!ready) return colDim;
+        return ok ? colOn : colNo;
+    };
+    // 连点器停止时门控/游戏状态没有意义，统一显示 —；运行时 combatReady 每 5ms 更新。
+    const bool combatShow = cs.running && cs.combatReady;
+    std::wstring gameVal = L"—";
+    uint32_t gameColor = colDim;
+    if (combatShow) {
+        if (cs.inGame) { gameVal = L"内"; gameColor = colOn; }
+        else           { gameVal = L"外"; gameColor = colAmber; }
+    }
+
+    swprintf(buf, 64, L"P%d", profile + 1);
+    HudCell cells[6];
+    cells[0] = { L"ESP", espOn ? L"开" : L"关", espOn ? colOn : colOff };
+    cells[1] = { L"连点", std::move(clickerVal), clickerColor };
+    cells[2] = { L"攻击", gateText(combatShow, cs.canAttack), gateColor(combatShow, cs.canAttack) };
+    cells[3] = { L"放置", gateText(combatShow, cs.canPlace), gateColor(combatShow, cs.canPlace) };
+    cells[4] = { L"游戏", std::move(gameVal), gameColor };
+    cells[5] = { L"方案", buf, colAcc };
+
+    float labelW[6] = {}, valueW[6] = {};
+    float contentW = 0.0f;
+    for (int i = 0; i < 6; ++i) {
+        labelW[i] = g_overlay.measureText(cells[i].label, kHudFont);
+        valueW[i] = g_overlay.measureText(cells[i].value, kHudFont);
+        contentW += kHudDotD + kHudDotGap + labelW[i] + kHudLabelGap + valueW[i];
+    }
+    float panelW = kHudPadX * 2.0f + contentW + kHudCellGap * 5.0f;
+    float panelH = kHudBarH;
+    int pw = (int)std::ceil(panelW);
+    int ph = (int)std::ceil(panelH);
+
+    if (g_statusBarCache.valid && g_statusBarCache.sig == sig &&
+        g_statusBarCache.w == pw && g_statusBarCache.h == ph)
+        return false;
+
+    if ((int)g_statusBarCache.px.size() != pw * ph) {
+        g_statusBarCache.px.assign((size_t)pw * ph, 0);
+        g_statusBarCache.valid = false;
+    }
+    g_statusBarCache.w = pw;
+    g_statusBarCache.h = ph;
+
+    if (g_overlay.begin_offscreen(pw, ph, g_statusBarCache.px.data())) {
+        memset(g_statusBarCache.px.data(), 0, (size_t)pw * ph * sizeof(uint32_t));
+
+        // 面板：半透明深底 + 左侧状态色条 + 1px 描边
+        uint32_t accent = cs.running ? colOn : (espOn ? colAcc : (cfg.colHud & 0xFFFFFF));
+        g_overlay.fillRectAlpha(0.0f, 0.0f, panelW, panelH, 0x0C1118, 0.86f);
+        g_overlay.fillRectAlpha(0.0f, 0.0f, 2.0f, panelH, accent, 0.90f);
+        g_overlay.fillRectAlpha(0.0f, 0.0f, panelW, 1.0f, 0x3A4C63, 0.90f);
+        g_overlay.drawLine(0.0f, panelH - 1.0f, panelW, panelH - 1.0f, 0x2A3A4D, 1);
+        g_overlay.drawLine(0.0f, 0.0f, 0.0f, panelH, 0x2A3A4D, 1);
+        g_overlay.drawLine(panelW - 1.0f, 0.0f, panelW - 1.0f, panelH, 0x2A3A4D, 1);
+
+        // 分项：指示灯 + 灰标签 + 高亮值，分项间画细分隔线
+        float x = kHudPadX;
+        const float cy = panelH * 0.5f;
+        const float ty = (panelH - 20.0f) * 0.5f;   // 13px 文本位图约 20px 高，垂直居中
+        for (int i = 0; i < 6; ++i) {
+            const float dotX = x + kHudDotD * 0.5f;
+            g_overlay.fillCircle(dotX, cy, 3.4f, 0x111A26);        // 深色外圈
+            g_overlay.fillCircle(dotX, cy, 2.1f, cells[i].color);  // 状态色灯芯
+            const float lx = x + kHudDotD + kHudDotGap;
+            g_overlay.drawText(lx, ty, cells[i].label, 0x8E9BAE, kHudFont);
+            const float vx = lx + labelW[i] + kHudLabelGap;
+            g_overlay.drawText(vx, ty, cells[i].value, cells[i].color, kHudFont);
+            x = vx + valueW[i];
+            if (i < 5) {
+                const float dx = x + kHudCellGap * 0.5f;
+                g_overlay.drawLine(dx, 7.0f, dx, panelH - 7.0f, 0x273449, 1);
+                x += kHudCellGap;
+            }
+        }
+
+        g_overlay.end_offscreen();
+        g_statusBarCache.sig = sig;
+        g_statusBarCache.valid = true;
+    } else {
+        g_statusBarCache.valid = false;
+    }
+    return true;
+}
+
+static void status_bar_blit(int w, int h, bool toastActive) {
+    if (!g_statusBarCache.valid) return;
+    const int cw = g_statusBarCache.w;
+    const int ch = g_statusBarCache.h;
+    if (cw <= 0 || ch <= 0) return;
+
+    int x0 = w - cw - 10;
+    if (x0 < 8) x0 = 8;
+    // Toast 出现时状态栏上移，避免和右下角提示重叠
+    int y0 = h - ch - 10 - (toastActive ? 44 : 0);
+    if (y0 < 8) y0 = 8;
+
+    const int x1 = (std::min)(w, x0 + cw);
+    const int y1 = (std::min)(h, y0 + ch);
+    if (x0 >= x1 || y0 >= y1) return;
+
+    uint32_t* dst = g_overlay.lockNoClear(w, h);
+    if (!dst) return;
+    const uint32_t* src = g_statusBarCache.px.data();
+    for (int y = y0; y < y1; ++y) {
+        memcpy(dst + (size_t)y * w + x0,
+               src + (size_t)(y - y0) * cw,
+               (size_t)(x1 - x0) * sizeof(uint32_t));
+    }
+}
+
 // ---- 方案 B：在调用线程（游戏渲染线程）内直接绘制覆盖层 ----
-// ESP 仍逐帧重绘；菜单使用离屏缓存，静态时每帧只 memcpy 面板区域。
+// ESP 仍逐帧重绘；菜单/状态栏使用离屏缓存，静态时只 memcpy 对应区域。
 static void esp_draw_overlay(const EspConfig& cfg) {
     // 先取预投影数据：swap 而不是 copy，避免每帧对两个 vector 重新分配。
     // （g_dataMutex 不嵌套在 g_overlayLock 内，避免锁序反转）
@@ -1624,16 +1811,37 @@ static void esp_draw_overlay(const EspConfig& cfg) {
     bool espOn = g_espEnabled.load(std::memory_order_acquire);
     bool menuOpen = g_menuVisible.load(std::memory_order_acquire);
     bool toastActive = toast_active();
-    if (!espOn && !menuOpen && !toastActive) return;
+    // 状态栏与 ESP 开关解耦；菜单打开时由菜单页脚显示状态，不再叠画 HUD。
+    bool statusOn = !menuOpen && status_bar_wanted();
+    if (!espOn && !menuOpen && !toastActive && !statusOn) return;
 
     int w = 0, h = 0;
     if (!g_overlay.lockNoClear(w, h) || w <= 0 || h <= 0) return;
 
     bool renderMenu = menuOpen && menu_need_render(w, h);
 
-    // ESP / 菜单缓存重绘 / 右下角 Toast 需要清空；纯静态菜单复用上一帧缓冲。
-    if (espOn || renderMenu || toastActive) {
-        g_overlay.lock(w, h);
+    // 状态栏缓存更新（离屏绘制，仍在 g_overlayLock 内）
+    bool statusChanged = false;
+    if (statusOn) statusChanged = status_bar_update(cfg, toastActive);
+
+    // 仅本线程访问的上一帧状态：
+    //   sizeChanged：覆盖层 DIB 被渲染线程重建后必须整屏清一次，避免未初始化像素。
+    //   menuOpen 翻转 / 状态栏首次出现 / 内容变化：整屏清，防止残留上一帧内容。
+    static bool s_lastMenuOpen = false;
+    static bool s_lastFrameFull = false;
+    static bool s_lastStatusDrawn = false;
+    static int  s_lastW = 0, s_lastH = 0;
+
+    bool sizeChanged = (w != s_lastW || h != s_lastH);
+    bool needsFull = sizeChanged || espOn || renderMenu || toastActive ||
+                     (menuOpen != s_lastMenuOpen) ||
+                     (statusOn && (statusChanged || !s_lastStatusDrawn || s_lastFrameFull));
+
+    // 任一动态内容存在时整屏清空；静态 HUD/菜单复用上一帧缓冲。
+    if (needsFull) {
+        g_overlay.lock(w, h);          // 全透明清屏
+    } else {
+        g_overlay.lockNoClear(w, h);   // 静态 HUD/菜单：复用上一帧
     }
 
     int lw = std::max(1, cfg.lineWidth - 1);
@@ -1673,22 +1881,20 @@ static void esp_draw_overlay(const EspConfig& cfg) {
         }
     }
 
-    if (espOn && cfg.nameTags) {
-        ClickerSnapshot cs = clicker_snapshot();
-        wchar_t status[96];
-        swprintf(status, 96, L"ESP ON   CLICKER %s   ATK:%s   PLACE:%s",
-                 cs.running ? L"ON" : L"OFF",
-                 cs.combatReady ? (cs.canAttack ? L"可" : L"否") : L"-",
-                 cs.combatReady ? (cs.canPlace ? L"可" : L"否") : L"-");
-        float sw = g_overlay.measureText(status, 14);
-        g_overlay.drawText((float)w - sw - 10, (float)h - 22, status, cfg.colHud, 14);
-    }
-
+    if (statusOn) status_bar_blit(w, h, toastActive);
     if (renderMenu) render_menu_cache(w, h, cfg);
     if (menuOpen) blit_menu_cache(w, h);
     if (toastActive) draw_toast(g_overlay, w, h);
 
-    g_overlay.present();
+    bool frameChanged = needsFull || statusChanged || toastActive ||
+                        (menuOpen != s_lastMenuOpen);
+    if (frameChanged) g_overlay.present();
+
+    s_lastMenuOpen = menuOpen;
+    s_lastFrameFull = needsFull;
+    s_lastStatusDrawn = statusOn;
+    s_lastW = w;
+    s_lastH = h;
 }
 
 // ---- SwapBuffers 钩子回调（游戏渲染线程） ----
@@ -1703,14 +1909,11 @@ void esp_on_swap() {
     bool enabled = g_espEnabled.load(std::memory_order_acquire);
     bool menuOpen = g_menuVisible.load(std::memory_order_acquire);
     bool toastActive = toast_active();
+    // 状态栏与 ESP 解耦：ESP 或连点器任一开启都显示；连点器运行时需要相机与门控状态。
+    bool statusOn = status_bar_wanted();
 
-    // 空闲优化：ESP 关、菜单关、门控关、无 Toast 时，完全不碰 JVM。
-    ClickerSnapshot idleSnap = clicker_snapshot();
-    bool needCombat = menuOpen ||
-                      (idleSnap.running && (idleSnap.settings.attackGate ||
-                                            idleSnap.settings.placeGate ||
-                                            idleSnap.settings.inGameGate));
-    if (!enabled && !needCombat && !toastActive) {
+    // 空闲优化：ESP 关、菜单关、连点器关、无 Toast 时，完全不碰 JVM。
+    if (!enabled && !menuOpen && !toastActive && !statusOn) {
         // 空闲预热：每 1s 尝试一次符号解析。这样第一次按 Insert 打开菜单时
         // JNI 符号早已就绪，不会把解析开销压在开菜单那一帧上。
         if (!jvm_ready()) {
@@ -1737,13 +1940,10 @@ void esp_on_swap() {
         cam.guiOpen = false;
 
     // ---- 连点器门控状态（5ms 节流，与参考 DLL 采样周期一致）----
-    // 仅在菜单打开或门控开启时读取，未开启门控时 zero JNI 开销。
+    // 菜单打开或连点器运行时读取：门控判定 + 状态栏实时值共用同一采样。
     {
         ClickerSnapshot cs = clicker_snapshot();
-        bool needCombat = menuOpen ||
-                          (cs.running && (cs.settings.attackGate ||
-                                          cs.settings.placeGate ||
-                                          cs.settings.inGameGate));
+        bool needCombat = menuOpen || cs.running;
         if (needCombat && !cam.guiOpen) {
             static DWORD lastCombatTick = 0;
             DWORD nowT = GetTickCount();
@@ -1789,8 +1989,8 @@ void esp_on_swap() {
         g_boxes.swap(boxes);
         g_trajectories.swap(trajs);
     }
-    // ESP / 菜单 / 右下角 Toast 任一需要显示时，在游戏渲染线程同步绘制。
-    if ((enabled || menuOpen || toastActive) &&
+    // ESP / 菜单 / 状态栏 / 右下角 Toast 任一需要显示时，在游戏渲染线程同步绘制。
+    if ((enabled || menuOpen || toastActive || statusOn) &&
         g_overlayVisible.load(std::memory_order_acquire) && !cam.guiOpen)
         esp_draw_overlay(cfg);
 }
@@ -1864,9 +2064,11 @@ static void render_loop(HWND gameHwnd) {
         }
 
         // ============ 统一可见性状态管理 ============
-        // ESP / 菜单 / 右下角 Toast 任一需要显示时显示覆盖层。
+        // ESP / 菜单 / 状态栏 / 右下角 Toast 任一需要显示时显示覆盖层。
         bool toastActive = toast_active();
-        bool wantVisible = g_espEnabled.load(std::memory_order_acquire) || menuOpen || toastActive;
+        bool hudOn = status_bar_wanted();
+        bool wantVisible = g_espEnabled.load(std::memory_order_acquire) ||
+                           menuOpen || toastActive || hudOn;
 
         // 界面检测：相机/界面状态由 SwapBuffers 钩子在游戏渲染线程每帧更新。
         if (wantVisible) {
@@ -1926,10 +2128,11 @@ static void render_loop(HWND gameHwnd) {
             }
         }
 
-        // 空闲降频：ESP/菜单/Toast 都关时宿主只需 30Hz 轮询热键与窗口状态；
-        // 菜单打开恢复 renderHz（跟手），仅 ESP 显示时用 60Hz 维持可见性对齐。
+        // 空闲降频：ESP/菜单/状态栏/Toast 都关时宿主只需 30Hz 轮询热键与窗口状态；
+        // 菜单打开恢复 renderHz（跟手），ESP 或 HUD 显示时用 60Hz 维持可见性对齐。
         int targetHz = menuOpen ? hostHz
-                     : (g_espEnabled.load(std::memory_order_acquire) || toastActive)
+                     : (g_espEnabled.load(std::memory_order_acquire) ||
+                        hudOn || toastActive)
                        ? (std::min)(60, hostHz)
                        : 30;
         int hostPeriodMs = 1000 / targetHz;

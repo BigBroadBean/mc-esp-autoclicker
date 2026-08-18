@@ -263,6 +263,30 @@ static inline void aa_plot(uint32_t* px, int W, int H, int x, int y,
     px[(size_t)y * W + x] = (oa << 24) | (or_ << 16) | (og << 8) | ob;
 }
 
+// 抗锯齿实心圆：逐像素按到圆心距离计算覆盖率，边缘 1px 平滑过渡。
+// 用作 HUD 状态指示灯，比 GDI Ellipse（走样 + 状态切换）更干净。
+void Overlay::fillCircle(float cx, float cy, float r, uint32_t rgb) {
+    if (!m_pixels || m_w <= 0 || m_h <= 0 || r <= 0.0f) return;
+    int x0 = (int)std::floor(cx - r - 1.0f);
+    int y0 = (int)std::floor(cy - r - 1.0f);
+    int x1 = (int)std::ceil(cx + r + 1.0f);
+    int y1 = (int)std::ceil(cy + r + 1.0f);
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > m_w) x1 = m_w;
+    if (y1 > m_h) y1 = m_h;
+    for (int y = y0; y < y1; ++y) {
+        for (int x = x0; x < x1; ++x) {
+            double dx = (double)x + 0.5 - (double)cx;
+            double dy = (double)y + 0.5 - (double)cy;
+            double cover = (double)r + 0.5 - std::sqrt(dx * dx + dy * dy);
+            if (cover <= 0.0) continue;
+            if (cover > 1.0) cover = 1.0;
+            aa_plot(m_pixels, m_w, m_h, x, y, cover, rgb, 1.0);
+        }
+    }
+}
+
 // Xiaolin Wu：1px 抗锯齿线段（subpixel 精度）
 static void wu_line(uint32_t* px, int W, int H,
                     double x0, double y0, double x1, double y1,
