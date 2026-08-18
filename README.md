@@ -23,11 +23,13 @@ Minecraft 1.20.1 Forge 47.4.10 注入式 **ESP + 连点器**，全部打包进�
    mc_esp.exe                自动查找 Minecraft 并注入
    mc_esp.exe -pid <PID>     注入指定 PID
    mc_esp.exe -find          仅查找进程，不注入
+   mc_esp.exe -dir <数据目录> 自定义 esp.ini / esp_log.txt 保存目录
    ```
 3. 注入成功后按 **`Insert`** 呼出 / 关闭菜单。
 
-`esp.ini` 与 `esp_log.txt` 始终位于 **`mc_esp.exe` 同目录**（首次运行自动生成
-`esp.ini`），不会写到临时 DLL 目录。
+`esp.ini` 与 `esp_log.txt` 默认位于 **`%APPDATA%\mc_esp\`**
+（通常是 `C:\Users\<用户名>\AppData\Roaming\mc_esp`），首次运行自动创建并生成
+`esp.ini`；也可以用 `-dir <数据目录>` 或环境变量 `MC_ESP_DATA_DIR` 指定其他位置。
 
 ### Insert 菜单操作
 
@@ -117,7 +119,8 @@ canPlace  = player.getMainHandItem().getItem() instanceof BlockItem
 
 ## 本地保存
 
-所有设置保存在 `mc_esp.exe` 同目录的 `esp.ini`（UTF-8，首次运行自动生成）。
+所有设置保存在 `data_directory()` 目录下的 `esp.ini`（UTF-8，首次运行自动生成）：
+默认 `%APPDATA%\mc_esp\`，可通过 `-dir` / `MC_ESP_DATA_DIR` 覆盖。
 菜单修改、滑块拖动结束、快捷键开关 ESP / 连点器 / 门控 / 切换方案都会立即写回；
 4 套方案分别保存在 `[clickerProfile1]`..`[clickerProfile4]`。
 
@@ -165,7 +168,7 @@ tools\smoke_mouse.exe
 
 g++ -O2 -std=c++17 -static-libgcc -static-libstdc++ -s -o tools\smoke_target.exe tools\smoke_target.cpp -luser32
 tools\smoke_target.exe
-mc_esp.exe -pid <smoke_target 打印的 PID>
+mc_esp.exe -pid <smoke_target 打印的 PID> -dir build_tmp\smoke_data
 ```
 
 ---
@@ -200,7 +203,8 @@ mc_esp.exe -pid <smoke_target 打印的 PID>
 
 ## 配置
 
-`mc_esp.exe` 启动时读取自身同目录 `esp.ini`；不存在时自动生成默认配置。
+`mc_esp.exe` 启动时从数据目录读取 `esp.ini`（默认 `%APPDATA%\mc_esp\`）；
+不存在时自动生成默认配置。
 默认：**ESP 关闭**、**左右键连点开启**、**连点器总开关关闭**。
 
 - `[esp]`：ESP 渲染参数；`menuKey` 菜单键、`espKey` ESP 快捷键；

@@ -1,5 +1,5 @@
 // smoke_target.cpp — 单文件 mc_esp.exe 注入目标（无 JVM 冒烟测试）。
-// 创建 GLFW 窗口并运行消息循环，等待 mc_esp.exe -pid <pid> 注入。
+// 创建 GLFW 窗口并运行消息循环，等待 mc_esp.exe -pid <pid> -dir <dataDir> 注入。
 #include <windows.h>
 #include <cstdio>
 

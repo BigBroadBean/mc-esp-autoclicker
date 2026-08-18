@@ -3,26 +3,44 @@
 // ============================================================
 #include "common.h"
 
-static std::wstring g_dllDir;
+static std::wstring g_dataDir;
 
-void dll_set_directory(const wchar_t* dir) {
-    g_dllDir = dir ? dir : L"";
+static void ensure_dir_sep(std::wstring& s) {
+    if (!s.empty() && s.back() != L'\\') s += L'\\';
 }
 
-std::wstring dll_directory() {
-    // 优先用 DllMain 里缓存的目录（PEB 模块隐藏后 GetModuleHandleExW 会失败）
-    if (!g_dllDir.empty()) return g_dllDir;
-    wchar_t buf[MAX_PATH * 2] = {0};
-    HMODULE h = nullptr;
-    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                       (LPCWSTR)&dll_directory, &h);
-    DWORD n = GetModuleFileNameW(h, buf, MAX_PATH * 2);
-    if (n == 0) return L"";
-    wchar_t* slash = wcsrchr(buf, L'\\');
-    if (slash) *(slash + 1) = L'\0';
-    g_dllDir = buf;
-    return g_dllDir;
+void data_set_directory(const wchar_t* dir) {
+    if (!dir || !*dir) return;
+    g_dataDir = dir;
+    ensure_dir_sep(g_dataDir);
+    CreateDirectoryW(g_dataDir.c_str(), nullptr);
+}
+
+std::wstring data_directory() {
+    if (!g_dataDir.empty()) return g_dataDir;
+
+    // 1) 测试/便携模式：显式环境变量优先
+    wchar_t env[2048] = {0};
+    DWORD n = GetEnvironmentVariableW(L"MC_ESP_DATA_DIR", env, 2048);
+    if (n > 0 && n < 2048) {
+        g_dataDir = env;
+        ensure_dir_sep(g_dataDir);
+        CreateDirectoryW(g_dataDir.c_str(), nullptr);
+        return g_dataDir;
+    }
+
+    // 2) 默认：%APPDATA%\mc_esp\（C 盘用户目录，写入无需管理员权限）
+    n = GetEnvironmentVariableW(L"APPDATA", env, 2048);
+    if (n > 0 && n < 2048) {
+        g_dataDir = env;
+        ensure_dir_sep(g_dataDir);
+        g_dataDir += L"mc_esp";
+    } else {
+        g_dataDir = L"C:\\mc_esp";   // APPDATA 异常时的兜底
+    }
+    ensure_dir_sep(g_dataDir);
+    CreateDirectoryW(g_dataDir.c_str(), nullptr);
+    return g_dataDir;
 }
 
 // 用宽路径打开日志文件（UTF-8 输出）。
@@ -33,7 +51,7 @@ static HANDLE log_file() {
     if (h == INVALID_HANDLE_VALUE) {
         const wchar_t* names[] = {L"esp_log.txt", L"esp_log_new.txt"};
         for (int k = 0; k < 2 && h == INVALID_HANDLE_VALUE; ++k) {
-            std::wstring p = dll_directory() + names[k];
+            std::wstring p = data_directory() + names[k];
             h = CreateFileW(p.c_str(), GENERIC_WRITE,
                             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                             nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -129,7 +147,7 @@ static void clamp_clicker_settings(ClickerSettings& cl) {
 }
 
 void config_load(EspConfig& cfg) {
-    std::wstring path = dll_directory() + L"esp.ini";
+    std::wstring path = data_directory() + L"esp.ini";
     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
                            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) {
@@ -258,7 +276,7 @@ void config_load(EspConfig& cfg) {
 }
 
 void config_save(const EspConfig& cfg) {
-    std::wstring path = dll_directory() + L"esp.ini";
+    std::wstring path = data_directory() + L"esp.ini";
     std::string out;
     out.reserve(4096);
     auto line = [&](const char* s) { out += s; out += "\r\n"; };

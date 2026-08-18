@@ -24,7 +24,7 @@ build_tmp\bin2h.exe build_tmp\mc_esp.dll build_tmp\payload.h
 if errorlevel 1 goto :err
 
 echo === [4/4] build single-file mc_esp.exe ===
-"%GCC%" -O2 -std=c++17 -static-libgcc -static-libstdc++ -s -Ibuild_tmp -o mc_esp.exe loader\loader.cpp -luser32
+"%GCC%" -O2 -std=c++17 -static-libgcc -static-libstdc++ -s -municode -Ibuild_tmp -o mc_esp.exe loader\loader.cpp -luser32
 if errorlevel 1 goto :err
 
 echo.

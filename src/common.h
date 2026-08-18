@@ -21,15 +21,15 @@
 // ------------------------------------------------------------
 // 路径工具（游戏/工程目录可能含中文，一律使用宽字符 API）
 // ------------------------------------------------------------
-// 返回 DLL 自身所在目录（结尾带 '\\'），失败返回 L""。
-std::wstring dll_directory();
-// 在 DLL 入口处（做 PEB 模块隐藏前）显式记录 DLL 目录，
-// 隐藏后 GetModuleHandleExW 找不到本模块，必须用缓存路径。
-void dll_set_directory(const wchar_t* dir);
+// 数据目录（esp.ini / esp_log.txt）：
+//   1) 加载器通过内存映射注入的自定义目录（mc_esp.exe -dir <path>）
+//   2) 环境变量 MC_ESP_DATA_DIR
+//   3) 默认 %APPDATA%\mc_esp\（通常为 C:\Users\<用户>\AppData\Roaming\mc_esp）
+// 目录不存在时自动创建。
+std::wstring data_directory();
+// 由 DllMain 在读取加载器目录映射后调用，提前固定数据目录。
+void data_set_directory(const wchar_t* dir);
 
-// ------------------------------------------------------------
-// 日志：写入 dll_directory() 目录下的 esp_log.txt（单文件 EXE 模式即 exe 目录）
-// ------------------------------------------------------------
 void esp_log(const char* fmt, ...);
 void esp_log_w(const wchar_t* fmt, ...);
 
@@ -102,9 +102,9 @@ struct EspConfig {
     uint32_t colLandHit = 0xFF0000;         // 弓预判命中实体方块：红（红石）
 };
 
-// 从 dll_directory() 读取 esp.ini；不存在时写入默认配置（单文件 EXE 模式即 exe 目录）。
+// 从 data_directory() 读取 esp.ini；不存在时写入默认配置。
 void config_load(EspConfig& cfg);
-// 把当前配置写回 dll_directory() 下的 esp.ini（菜单修改后立即持久化）。
+// 把当前配置写回 data_directory() 下的 esp.ini（菜单修改后立即持久化）。
 void config_save(const EspConfig& cfg);
 
 // ------------------------------------------------------------
