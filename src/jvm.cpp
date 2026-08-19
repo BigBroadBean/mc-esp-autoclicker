@@ -51,6 +51,12 @@ static std::unordered_map<int, EntityMeta> g_metaCache;
 static DWORD g_metaRefreshTick = 0;
 static const DWORD kMetaRefreshMs = 1000;   // 每 1s 重读一次元数据（跟踪尺寸/类型变化）
 
+// 鼠标灵敏度很少变化，按 250ms 缓存，避免每个渲染帧都穿过三层 Java 对象。
+static float g_mouseSensitivityCache = 0.5f;
+static bool  g_mouseSensitivityValid = false;
+static bool  g_invertYCache = false;
+static DWORD g_mouseSensitivityTick = 0;
+
 bool jvm_ready() { return g_resolved.load(std::memory_order_acquire); }
 
 // ------------------------------------------------------------
@@ -58,6 +64,7 @@ bool jvm_ready() { return g_resolved.load(std::memory_order_acquire); }
 // ------------------------------------------------------------
 static jclass c_Minecraft, c_ClientLevel, c_Entity, c_LivingEntity, c_Player,
              c_EntityType, c_Vec3, c_Camera, c_GameRenderer, c_Matrix4f,
+             c_Options, c_OptionInstance, c_Double, c_Boolean,
              c_Component, c_Iterable, c_Iterator, c_RemovalReason, c_ChatScreen,
              c_Projectile, c_ItemStack, c_Item,
              c_HitResult, c_EntityHitResult, c_BlockItem,
@@ -72,6 +79,7 @@ static jmethodID m_getInstance, m_getFrameTime,            // Minecraft
                  m_getDescriptionId,                        // EntityType
                  m_getPosition, m_getPitch, m_getYaw,       // Camera
                  m_getMainCamera, m_getFov,                 // GameRenderer
+                 m_getSensitivity, m_getInvertY, m_optionGet, m_doubleValue, m_boolValue, // Options / OptionInstance / wrappers
                  m_getString,                               // Component
                  m_iterator, m_hasNext, m_next,             // Iterable/Iterator
                  m_getEyeHeight, m_getYRot, m_getXRot,      // Entity（玩家）
@@ -83,7 +91,7 @@ static jmethodID m_getInstance, m_getFrameTime,            // Minecraft
                  m_clip, m_hitGetType, m_hitGetLocation,     // Level / HitResult
                  m_v3Ctor, m_ccCtor;                         // Vec3 / ClipContext 构造器
 static jfieldID f_level, f_gameRenderer, f_player, f_screen,       // Minecraft
-                f_hitResult,                                        // Minecraft（连点器门控）
+                f_options, f_hitResult,                              // Minecraft
                 f_x, f_y, f_z, f_xo, f_yo, f_zo,                    // Entity
                 f_onGround,                                         // Entity（玩家是否在地面）
                 f_vx, f_vy, f_vz;                                   // Vec3
@@ -395,6 +403,10 @@ bool jvm_resolve_all() {
     RES_CLS(c_Camera,        "net/minecraft/client/Camera");
     RES_CLS(c_GameRenderer,  "net/minecraft/client/renderer/GameRenderer");
     RES_CLS(c_Matrix4f,      "org/joml/Matrix4f");
+    RES_CLS(c_Options,       "net/minecraft/client/Options");
+    RES_CLS(c_OptionInstance,"net/minecraft/client/OptionInstance");
+    RES_CLS(c_Double,        "java/lang/Double");
+    RES_CLS(c_Boolean,       "java/lang/Boolean");
     RES_CLS(c_Component,     "net/minecraft/network/chat/Component");
     RES_CLS(c_Iterable,      "java/lang/Iterable");
     RES_CLS(c_Iterator,      "java/util/Iterator");
@@ -436,6 +448,12 @@ bool jvm_resolve_all() {
         static const char* n[] = {"f_91074_", "player"};
         f_player = resolve_field(c_Minecraft, "player", n, 2,
                                  "Lnet/minecraft/client/player/LocalPlayer;", false);
+    }
+    // mappings-extracted/1.20.1：Minecraft.f_91066_ = Options。
+    {
+        static const char* n[] = {"f_91066_", "options"};
+        f_options = resolve_field(c_Minecraft, "options", n, 2,
+                                  "Lnet/minecraft/client/Options;", false);
     }
     // 当前打开界面（Esc/背包/聊天…）：有界面时不渲染 ESP。
     // 先按 SRG 名尝试，失败再按类型反射查找，保证命中。
@@ -480,6 +498,33 @@ bool jvm_resolve_all() {
     {
         static const char* n[] = {"m_21233_", "getMaxHealth"};
         m_getMaxHealth = resolve_method(c_LivingEntity, "LivingEntity.getMaxHealth", n, 2, "()F", false);
+    }
+
+    // ---- Options / OptionInstance ----
+    // 1.20.1 mappings：Options.m_231964_() 返回鼠标灵敏度 OptionInstance<Double>，
+    // OptionInstance.m_231551_() 返回当前装箱值。
+    {
+        static const char* n[] = {"m_231964_", "sensitivity", "getMouseSensitivity"};
+        m_getSensitivity = resolve_method(c_Options, "Options.sensitivity", n, 3,
+                                          "()Lnet/minecraft/client/OptionInstance;", false);
+    }
+    {
+        static const char* n[] = {"m_231820_", "invertYMouse", "getInvertYMouse"};
+        m_getInvertY = resolve_method(c_Options, "Options.invertYMouse", n, 3,
+                                      "()Lnet/minecraft/client/OptionInstance;", false);
+    }
+    {
+        static const char* n[] = {"m_231551_", "get", "getValue"};
+        m_optionGet = resolve_method(c_OptionInstance, "OptionInstance.get", n, 3,
+                                     "()Ljava/lang/Object;", false);
+    }
+    {
+        static const char* n[] = {"doubleValue"};
+        m_doubleValue = resolve_method(c_Double, "Double.doubleValue", n, 1, "()D", false);
+    }
+    {
+        static const char* n[] = {"booleanValue"};
+        m_boolValue = resolve_method(c_Boolean, "Boolean.booleanValue", n, 1, "()Z", false);
     }
 
     // ---- ClientLevel ----
@@ -694,8 +739,9 @@ bool jvm_resolve_all() {
 
     bool ok = c_Minecraft && c_Entity && c_ClientLevel && c_Camera && c_GameRenderer &&
               m_getInstance && m_getFrameTime && f_level && f_gameRenderer &&
-              m_entitiesForRendering && f_x && f_y && f_z && m_getBbWidth && m_getBbHeight &&
-              m_getType && m_getPosition && m_getPitch && m_getYaw && m_getMainCamera;
+              m_entitiesForRendering && f_x && f_y && f_z && f_xo && f_yo && f_zo &&
+              m_getBbWidth && m_getBbHeight && m_getType && m_getPosition &&
+              m_getPitch && m_getYaw && m_getMainCamera;
     if (ok) g_resolved.store(true, std::memory_order_release);
     esp_log(ok ? "[混淆] 全部关键符号解析成功" : "[混淆] 存在缺失符号，ESP 不可用");
     return ok;
@@ -706,15 +752,22 @@ void jvm_cleanup() {
     auto rel = [](jclass& c) { if (c) { g_env->DeleteGlobalRef(c); c = nullptr; } };
     rel(c_Minecraft); rel(c_ClientLevel); rel(c_Entity); rel(c_LivingEntity);
     rel(c_Player); rel(c_EntityType); rel(c_Vec3); rel(c_Camera); rel(c_GameRenderer);
-    rel(c_Matrix4f); rel(c_Component); rel(c_Iterable); rel(c_Iterator); rel(c_RemovalReason);
+    rel(c_Matrix4f); rel(c_Options); rel(c_OptionInstance); rel(c_Double); rel(c_Boolean);
+    rel(c_Component); rel(c_Iterable); rel(c_Iterator); rel(c_RemovalReason);
     rel(c_ChatScreen); rel(c_Projectile); rel(c_ItemStack); rel(c_Item);
     rel(c_HitResult); rel(c_EntityHitResult); rel(c_BlockItem);
     rel(c_ClipContext); rel(c_ClipContext_Block); rel(c_ClipContext_Fluid);
     rel(c_HitResult_Type); rel(c_BlockHitResult);
+    if (g_transform_cl) { g_env->DeleteGlobalRef(g_transform_cl); g_transform_cl = nullptr; }
+    g_mouseSensitivityCache = 0.5f;
+    g_mouseSensitivityValid = false;
+    g_invertYCache = false;
+    g_mouseSensitivityTick = 0;
+    g_resolved.store(false, std::memory_order_release);
 }
 
 // ------------------------------------------------------------
-// 读取相机（FOV 固定从 esp.ini 配置读取，不再使用投影矩阵推导）
+// 读取相机（实际 FOV + 鼠标选项，均在游戏渲染线程读取）
 // ------------------------------------------------------------
 CamData jvm_read_camera() {
     CamData cd{};
@@ -729,6 +782,50 @@ CamData jvm_read_camera() {
     jobject gr = g_env->GetObjectField(mc, f_gameRenderer);
     if (gr && g_env->ExceptionCheck()) { g_env->ExceptionClear(); }
     if (!gr) { g_env->PopLocalFrame(nullptr); return cd; }
+
+    // 读取游戏真实鼠标灵敏度，供自瞄把角度误差换算为原生鼠标计数。
+    // 250ms 刷新一次；失败保留上次有效值，首次失败才走 0.5 兼容回退。
+    const DWORD sensNow = GetTickCount();
+    if (g_mouseSensitivityTick == 0 || (DWORD)(sensNow - g_mouseSensitivityTick) >= 250) {
+        g_mouseSensitivityTick = sensNow;
+        if (f_options && m_getSensitivity && m_optionGet && m_doubleValue) {
+            jobject options = g_env->GetObjectField(mc, f_options);
+            if (g_env->ExceptionCheck()) g_env->ExceptionClear();
+            jobject option = options ? g_env->CallObjectMethod(options, m_getSensitivity) : nullptr;
+            if (g_env->ExceptionCheck()) g_env->ExceptionClear();
+            jobject boxed = option ? g_env->CallObjectMethod(option, m_optionGet) : nullptr;
+            if (g_env->ExceptionCheck()) g_env->ExceptionClear();
+            if (boxed) {
+                const double value = g_env->CallDoubleMethod(boxed, m_doubleValue);
+                if (!g_env->ExceptionCheck() && std::isfinite(value) && value >= 0.0 && value <= 1.0) {
+                    g_mouseSensitivityCache = (float)value;
+                    g_mouseSensitivityValid = true;
+                } else if (g_env->ExceptionCheck()) {
+                    g_env->ExceptionClear();
+                }
+            }
+            if (boxed) g_env->DeleteLocalRef(boxed);
+            if (option) g_env->DeleteLocalRef(option);
+
+            if (options && m_getInvertY && m_boolValue) {
+                jobject invertOption = g_env->CallObjectMethod(options, m_getInvertY);
+                if (g_env->ExceptionCheck()) g_env->ExceptionClear();
+                jobject invertBoxed = invertOption ? g_env->CallObjectMethod(invertOption, m_optionGet) : nullptr;
+                if (g_env->ExceptionCheck()) g_env->ExceptionClear();
+                if (invertBoxed) {
+                    const jboolean value = g_env->CallBooleanMethod(invertBoxed, m_boolValue);
+                    if (!g_env->ExceptionCheck()) g_invertYCache = value == JNI_TRUE;
+                    else g_env->ExceptionClear();
+                }
+                if (invertBoxed) g_env->DeleteLocalRef(invertBoxed);
+                if (invertOption) g_env->DeleteLocalRef(invertOption);
+            }
+            if (options) g_env->DeleteLocalRef(options);
+        }
+    }
+    cd.mouseSensitivity = g_mouseSensitivityCache;
+    cd.sensitivityValid = g_mouseSensitivityValid;
+    cd.invertY = g_invertYCache;
 
     float partialTick = g_env->CallFloatMethod(mc, m_getFrameTime);
     if (g_env->ExceptionCheck()) { g_env->ExceptionClear(); partialTick = 1.f; }

@@ -28,6 +28,9 @@ struct CamData {
     double  px, py, pz;   // 相机世界坐标
     float   yaw, pitch;   // 角度
     float   fov;          // 透视 fov（垂直，来自游戏投影矩阵）
+    float   mouseSensitivity; // Options.sensitivity 原始值（通常 0..1）
+    bool    sensitivityValid;
+    bool    invertY;      // Options.invertYMouse
     float   partialTick;  // 帧间插值系数
     bool    guiOpen;      // 有界面打开（Esc/背包/聊天等，mc.screen != null）→ 默认不渲染 ESP
     bool    screenIsChat; // 当前打开的是否为聊天界面（ChatScreen，按 T 打开）

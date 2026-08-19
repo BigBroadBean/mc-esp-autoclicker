@@ -78,9 +78,10 @@ enum AimPriority {
 };
 
 enum AimSecondTarget {
-    AIM_SECOND_LEVEL = 0,       // 放平：本地玩家视平线高度的水平中心
-    AIM_SECOND_FIRST_HEIGHT,    // 不放平：第一目标点高度的水平中心
-    AIM_SECOND_KEEP_NEAREST,    // 不切换：一直保持最近点
+    AIM_SECOND_LEVEL = 0,       // 自身视平线高度的碰撞箱水平中心
+    AIM_SECOND_FIRST_HEIGHT,    // 真实进盒高度的碰撞箱水平中心
+    AIM_SECOND_KEEP_NEAREST,    // 保持真实进盒点
+    AIM_SECOND_CUSTOM_HEIGHT,   // aimHeight 高度的碰撞箱水平中心
     AIM_SECOND_COUNT
 };
 
@@ -93,18 +94,21 @@ struct AimSettings {
     bool    aimMobs          = true;        // 瞄准生物
     bool    aimOthers        = false;       // 瞄准其他实体
     int     priority         = AIM_PRIORITY_CROSSHAIR;  // 目标优先级
-    float   fov              = 90.0f;       // 瞄准视野范围（全角，度）：准星周围 ±fov/2
-    double  maxDistance      = 60.0;        // 最大瞄准距离（格）
-    int     smooth           = 6;           // 平滑度 1..10（越大越像人手缓动）
-    int     reactionMs       = 100;         // 锁定新目标后的反应延迟（毫秒）
-    float   mouseSensitivity = 1.0f;        // 鼠标移动倍率 0.5..2.0
-    int     predictionTicks  = 0;           // 预判目标移动 tick 数 0..20
-    int     switchCooldownMs = 300;         // 切换目标冷却（毫秒）
-    int     secondTarget     = AIM_SECOND_LEVEL;   // 第二目标模式（命中碰撞箱后）
-    int     secondSmooth     = 5;           // 第一目标 → 第二目标的过渡平滑度 1..10
-    int     stability        = 8;           // 对齐第二目标后的微小移动死区（像素）0..30
-    int     visualMode       = 3;           // 0=不显示 1=目标点 2=+瞄准线 3=+FOV 圈
-    bool    visibleOnly      = true;        // 仅瞄准视线可达目标（墙壁后不瞄）
+    float   fov              = 70.0f;       // 获取 FOV 全角（角度域，准星周围 ±fov/2）
+    double  maxDistance      = 32.0;        // 最大瞄准距离（格）
+    int     smooth           = 5;           // 平滑度 1..10（1 快、10 柔）
+    int     reactionMs       = 70;          // 获取/切换目标后的反应延迟（毫秒）
+    float   mouseSensitivity = 1.0f;        // 自瞄速度微调；游戏实际灵敏度会自动读取
+    int     predictionTicks  = 0;           // 水平移动预判 tick 数 0..20
+    int     switchCooldownMs = 350;         // 切换目标冷却（毫秒）
+    int     secondTarget     = AIM_SECOND_CUSTOM_HEIGHT; // 进盒后回到自定义高度中心
+    int     secondSmooth     = 4;           // 进盒点 → 第二落点的过渡平滑度 1..10
+    int     stability        = 6;           // 收敛后重新追踪的释放半径（像素）0..30
+    int     visualMode       = 0;           // 0=不显示 1=目标点 2=+瞄准线 3=+FOV 圈
+    bool    visibleOnly      = true;        // 仅瞄准视线可达目标（墙壁后不移动）
+    int     assist           = 6;           // 辅助强度 0..10（0=不动、10=强纠）
+    int     aimHeight        = 62;          // 碰撞箱底部向上的落点百分比 45..80
+    bool    sticky           = true;        // 黏锁：已锁定目标优先保持，不因瞬间出圈/穿墙换人
 };
 
 // ------------------------------------------------------------

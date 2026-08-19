@@ -52,10 +52,49 @@ static std::shared_ptr<const EspConfig> esp_cfg_get() {
     return std::atomic_load(&g_espCfgSnapshot);
 }
 
+// 夜航仪表盘主题：菜单、Toast、HUD 共用同一套语义色。
+// 直角面板和细色轨保留 Minecraft 工具/仪器的硬朗感，
+// 视觉层次由 surface、keyline、signal 三层结构完成。
+struct UiTheme {
+    uint32_t surface;
+    uint32_t surfaceRaised;
+    uint32_t surfaceSelected;
+    uint32_t surfaceHover;
+    uint32_t keyline;
+    uint32_t keylineBright;
+    uint32_t text;
+    uint32_t textDim;
+    uint32_t textMuted;
+    uint32_t accent;
+    uint32_t success;
+    uint32_t warning;
+    uint32_t danger;
+    uint32_t track;
+    uint32_t thumb;
+};
+
+static const UiTheme kUiTheme = {
+    0x0A1018,  // surface
+    0x0E1824,  // surfaceRaised
+    0x17374A,  // surfaceSelected
+    0x163047,  // surfaceHover
+    0x29445A,  // keyline
+    0x42647B,  // keylineBright
+    0xE8F3F5,  // text
+    0x91A8B3,  // textDim
+    0x607985,  // textMuted
+    0x62D6E8,  // accent
+    0x5ED6A5,  // success
+    0xF3B562,  // warning
+    0xF27672,  // danger
+    0x20364A,  // track
+    0xD5F1F2   // thumb
+};
+
 // ---- 右下角悬浮提示（单条，最新覆盖）----
 static std::mutex        g_toastMutex;
 static std::wstring      g_toastText;
-static uint32_t          g_toastColor = 0x66A3FF;
+static uint32_t          g_toastColor = kUiTheme.accent;
 static std::atomic<DWORD> g_toastStartMs{0};
 static constexpr DWORD   kToastDurationMs = 2200;
 
@@ -691,12 +730,13 @@ enum MenuItem {
     MI_AIM_SMOOTH, MI_AIM_REACTION, MI_AIM_SENS, MI_AIM_PREDICT,
     MI_AIM_COOLDOWN,
     MI_AIM_TARGET2, MI_AIM_TARGET2_SMOOTH, MI_AIM_STABILITY,
+    MI_AIM_ASSIST, MI_AIM_HEIGHT, MI_AIM_STICKY,
     MI_AIM_VISIBLE, MI_AIM_VISUAL,
     MI_PROFILE, MI_PROFILE_KEY,
     MI_COUNT
 };
 
-static constexpr int kMenuMaxRows = 20;
+static constexpr int kMenuMaxRows = 23;
 static const int kPageClickItems[kMenuMaxRows] = {
     MI_CLICKER, MI_LEFT, MI_LEFT_CPS, MI_LEFT_PRESET,
     MI_RIGHT, MI_RIGHT_CPS, MI_RIGHT_PRESET,
@@ -704,7 +744,7 @@ static const int kPageClickItems[kMenuMaxRows] = {
     -1, -1,
     -1, -1,
     -1,
-    -1
+    -1, -1, -1, -1
 };
 
 
@@ -716,7 +756,7 @@ static const int kPageGateItems[kMenuMaxRows] = {
     -1, -1,
     -1, -1,
     -1,
-    -1
+    -1, -1, -1, -1
 };
 
 
@@ -728,7 +768,7 @@ static const int kPageAdvItems[kMenuMaxRows] = {
     -1, -1,
     -1, -1,
     -1,
-    -1
+    -1, -1, -1, -1
 };
 
 
@@ -744,7 +784,7 @@ static const int kPageEspItems[kMenuMaxRows] = {
     -1, -1,
     -1, -1,
     -1,
-    -1
+    -1, -1, -1, -1
 };
 
 
@@ -755,17 +795,17 @@ static const int kPageAimItems[kMenuMaxRows] = {
     MI_AIM_PLAYERS, MI_AIM_MOBS, MI_AIM_OTHERS,
     MI_AIM_PRIORITY,
     MI_AIM_FOV, MI_AIM_DIST,
-    MI_AIM_SMOOTH, MI_AIM_REACTION, MI_AIM_SENS, MI_AIM_PREDICT,
-    MI_AIM_COOLDOWN,
-    MI_AIM_TARGET2, MI_AIM_TARGET2_SMOOTH, MI_AIM_STABILITY,
-    MI_AIM_VISIBLE, MI_AIM_VISUAL
+    MI_AIM_SMOOTH, MI_AIM_ASSIST, MI_AIM_REACTION, MI_AIM_SENS,
+    MI_AIM_PREDICT, MI_AIM_COOLDOWN,
+    MI_AIM_HEIGHT, MI_AIM_TARGET2, MI_AIM_TARGET2_SMOOTH, MI_AIM_STABILITY,
+    MI_AIM_STICKY, MI_AIM_VISIBLE, MI_AIM_VISUAL
 };
 static const int kPageSysItems[kMenuMaxRows] = {
     MI_PROFILE, MI_PROFILE_KEY, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
     -1, -1,
     -1, -1,
     -1,
-    -1
+    -1, -1, -1, -1
 };
 
 
@@ -774,7 +814,7 @@ static const int kPageSysItems[kMenuMaxRows] = {
 static const int* kPageItems[PAGE_COUNT] = {
     kPageClickItems, kPageGateItems, kPageAdvItems, kPageEspItems, kPageAimItems, kPageSysItems
 };
-static const int kPageRowCount[PAGE_COUNT] = { 9, 6, 7, 14, 20, 2 };
+static const int kPageRowCount[PAGE_COUNT] = { 9, 6, 7, 14, 23, 2 };
 
 struct MenuItemDef { const wchar_t* label; const wchar_t* tip; };
 static const MenuItemDef kMenuItemDefs[MI_COUNT] = {
@@ -814,7 +854,7 @@ static const MenuItemDef kMenuItemDefs[MI_COUNT] = {
     { L"最大距离",     L"只绘制此距离内的实体，10..500 格。" },
     { L"弹射物轨迹",   L"预测箭/雪球/末影珍珠飞行轨迹与弓蓄力抛物线。" },
     { L"轨迹 tick",    L"弹射物轨迹预测长度，5..63 tick（20 tick = 1 秒）。" },
-    { L"自瞄",         L"自瞄总开关。准星在碰撞箱外时瞄向最近表面点，命中后转为视平线高度中心。" },
+    { L"自瞄",         L"自瞄总开关。角度域目标选择与真实灵敏度适配，默认胸口磁吸而非瞬间锁死。" },
     { L"触发模式",     L"按住左键 / 按住右键 / 按住自瞄键 / 自瞄键切换 / 始终瞄准。" },
     { L"自瞄键",       L"按住或切换自瞄的快捷键；Enter 后按任意键绑定。" },
     { L"自瞄开关热键", L"游戏内直接开/关自瞄总开关的快捷键，和 ESP 开关热键同级；Enter 后按任意键绑定。" },
@@ -822,17 +862,20 @@ static const MenuItemDef kMenuItemDefs[MI_COUNT] = {
     { L"目标生物",     L"是否把怪物/动物等生物纳入自瞄目标。" },
     { L"目标其他",     L"是否把其他实体纳入自瞄目标（弹射物永远排除）。" },
     { L"优先目标",     L"准星最近：离准星角距最小；距离最近；血量最低。" },
-    { L"视野范围",     L"只瞄准准星周围该角度范围内的目标，10..180 度（全角）。" },
+    { L"视野范围",     L"角度域获取 FOV，10..180 度（全角）；当前目标另有约 1.18x 释放 FOV 防抖。" },
     { L"最大距离",     L"只瞄准此距离内的目标，5..200 格。" },
-    { L"平滑度",       L"鼠标移动平滑度：1 快，10 最缓，数值越大越像人手。" },
-    { L"反应延迟",     L"锁定新目标后的反应停顿，0..300 毫秒。" },
-    { L"鼠标灵敏度",   L"自瞄移动倍率，0.5..2.0。游戏灵敏度变化时可微调。" },
-    { L"预判 tick",    L"按目标当前速度外推 0..20 tick，0 为不预判。" },
+    { L"平滑度",       L"角度域加减速与收敛速度：1 最快，10 最柔；不受游戏帧率和分辨率影响。" },
+    { L"反应延迟",     L"真正获取或切换到新目标后的停顿；保持同一目标不会重复等待，0..300 毫秒。" },
+    { L"速度微调",     L"游戏真实鼠标灵敏度已自动读取；此项只微调自瞄速度，1.00 为推荐基准。" },
+    { L"预判 tick",    L"按平滑后的水平速度外推 0..20 tick；近战自动关闭，竖直不加提前量。" },
     { L"切换冷却",     L"锁定新目标后此时间内不切换目标，0..2000 毫秒。" },
-    { L"第二目标",     L"命中碰撞箱后的落点：放平中心 / 不放平（第一目标高度中心）/ 保持最近点。" },
-    { L"二段平滑",     L"从第一目标（最近点）过渡到第二目标的平滑度，1 快 10 最缓。" },
-    { L"稳定度",       L"对齐第二目标后，目标只移动此像素范围内就不再移动鼠标，0..30。" },
-    { L"视线检测",     L"开启后墙壁后的目标不会自瞄；关闭可穿墙瞄准。" },
+    { L"第二目标",     L"准星进入碰撞箱后的落点：自身视平线 / 进盒高度 / 保持进盒点 / 自定义高度中心。" },
+    { L"二段平滑",     L"从真实进盒点过渡到第二落点的时间，1 快 10 柔；出盒后重新建立进盒点。" },
+    { L"稳定度",       L"先收敛到约 1px/半个最小鼠标计数，再允许目标在此半径内轻微移动而停手，0..30px。" },
+    { L"辅助强度",     L"控制纠偏比例：0 只选目标不动鼠标，6 推荐磁吸，10 强纠；进盒后自动降权。" },
+    { L"瞄准高度",     L"碰撞箱底部向上的落点百分比，45 腿 / 62 胸口 / 80 头。" },
+    { L"黏锁",         L"当前目标需要明显更差才切换；短暂越出释放 FOV 或被墙挡住时保留目标但停手。" },
+    { L"视线检测",     L"开启后只获取可见目标；当前目标被墙挡住有短宽限，但宽限内绝不穿墙移动。" },
     { L"自瞄显示",     L"0=不显示 1=目标点 2=目标点+瞄准线 3=再显示 FOV 圈。" },
     { L"配置方案",     L"切换整套连点参数方案，4 套方案独立保存。" },
     { L"方案热键",     L"游戏内按此键循环切换 4 套连点方案；Enter 后按任意键绑定。" },
@@ -843,7 +886,7 @@ static const wchar_t* kAimModeNames[AIM_TRIGGER_COUNT] = {
     L"按住左键", L"按住右键", L"按住自瞄键", L"自瞄键切换", L"始终瞄准"
 };
 static const wchar_t* kAimPriorityNames[3] = { L"准星最近", L"距离最近", L"血量最低" };
-static const wchar_t* kAimTarget2Names[AIM_SECOND_COUNT] = { L"放平中心", L"不放平中心", L"保持最近点" };
+static const wchar_t* kAimTarget2Names[AIM_SECOND_COUNT] = { L"视平线中心", L"进盒高度中心", L"保持进盒点", L"自定义高度中心" };
 static const wchar_t* kAimVisualNames[4] = { L"关闭", L"目标点", L"点+线", L"全部" };
 
 // ---- 菜单缓存与状态 ----
@@ -926,7 +969,8 @@ static bool menu_is_slider(int item) {
            item == MI_AIM_SMOOTH || item == MI_AIM_REACTION ||
            item == MI_AIM_SENS || item == MI_AIM_PREDICT ||
            item == MI_AIM_COOLDOWN || item == MI_AIM_TARGET2_SMOOTH ||
-           item == MI_AIM_STABILITY;
+           item == MI_AIM_STABILITY || item == MI_AIM_ASSIST ||
+           item == MI_AIM_HEIGHT;
 }
 
 static void menu_slider_rect_local(int panelW, int row, int& x0, int& x1) {
@@ -960,6 +1004,8 @@ static float menu_slider_norm(int item, const EspConfig& cfg) {
     case MI_AIM_COOLDOWN: return clamp01((float)cfg.aim.switchCooldownMs / 2000.0f);
     case MI_AIM_TARGET2_SMOOTH: return clamp01((float)(cfg.aim.secondSmooth - 1) / 9.0f);
     case MI_AIM_STABILITY: return clamp01((float)cfg.aim.stability / 30.0f);
+    case MI_AIM_ASSIST:    return clamp01((float)cfg.aim.assist / 10.0f);
+    case MI_AIM_HEIGHT:    return clamp01((float)(cfg.aim.aimHeight - 45) / 35.0f);
     default: return 0.0f;
     }
 }
@@ -987,6 +1033,8 @@ static void menu_slider_apply(int item, float t, EspConfig& cfg) {
     case MI_AIM_COOLDOWN: { int v = (int)(t * 2000.0f + 0.5f); if (v < 0) v = 0; if (v > 2000) v = 2000; cfg.aim.switchCooldownMs = v; break; }
     case MI_AIM_TARGET2_SMOOTH: { int v = 1 + (int)(t * 9.0f + 0.5f); if (v < 1) v = 1; if (v > 10) v = 10; cfg.aim.secondSmooth = v; break; }
     case MI_AIM_STABILITY: { int v = (int)(t * 30.0f + 0.5f); if (v < 0) v = 0; if (v > 30) v = 30; cfg.aim.stability = v; break; }
+    case MI_AIM_ASSIST: { int v = (int)(t * 10.0f + 0.5f); if (v < 0) v = 0; if (v > 10) v = 10; cfg.aim.assist = v; break; }
+    case MI_AIM_HEIGHT: { int v = 45 + (int)(t * 35.0f + 0.5f); if (v < 45) v = 45; if (v > 80) v = 80; cfg.aim.aimHeight = v; break; }
     default: break;
     }
 }
@@ -1002,9 +1050,9 @@ static void commit_config() {
 // 连点线程热键开关后的右下角悬浮提示
 static void on_clicker_hotkey_toast(int kind, bool on) {
     switch (kind) {
-    case 0: show_toast(on ? L"连点器已开启" : L"连点器已停止", 0x52D88C); break;
-    case 1: show_toast(on ? L"仅可攻击时左键：开" : L"仅可攻击时左键：关", 0x66A3FF); break;
-    case 2: show_toast(on ? L"仅持方块时右键：开" : L"仅持方块时右键：关", 0x66A3FF); break;
+    case 0: show_toast(on ? L"连点器已开启" : L"连点器已停止", kUiTheme.success); break;
+    case 1: show_toast(on ? L"仅可攻击时左键：开" : L"仅可攻击时左键：关", kUiTheme.accent); break;
+    case 2: show_toast(on ? L"仅持方块时右键：开" : L"仅持方块时右键：关", kUiTheme.accent); break;
     default: break;
     }
 }
@@ -1125,6 +1173,9 @@ static void menu_adjust(int item, int dir, bool fast) {
     case MI_AIM_TARGET2: { int v = cfg.aim.secondTarget + dir; if (v < 0) v = AIM_SECOND_COUNT - 1; if (v >= AIM_SECOND_COUNT) v = 0; cfg.aim.secondTarget = v; break; }
     case MI_AIM_TARGET2_SMOOTH: { int v = cfg.aim.secondSmooth + dir; if (v < 1) v = 1; if (v > 10) v = 10; cfg.aim.secondSmooth = v; break; }
     case MI_AIM_STABILITY: { int step = fast ? 5 : 1; int v = cfg.aim.stability + dir * step; if (v < 0) v = 0; if (v > 30) v = 30; cfg.aim.stability = v; break; }
+    case MI_AIM_ASSIST: { int v = cfg.aim.assist + dir; if (v < 0) v = 0; if (v > 10) v = 10; cfg.aim.assist = v; break; }
+    case MI_AIM_HEIGHT: { int step = fast ? 5 : 1; int v = cfg.aim.aimHeight + dir * step; if (v < 45) v = 45; if (v > 80) v = 80; cfg.aim.aimHeight = v; break; }
+    case MI_AIM_STICKY: cfg.aim.sticky = !cfg.aim.sticky; break;
     case MI_AIM_VISIBLE: cfg.aim.visibleOnly = !cfg.aim.visibleOnly; break;
     case MI_AIM_VISUAL: { int v = cfg.aim.visualMode + dir; if (v < 0) v = 3; if (v > 3) v = 0; cfg.aim.visualMode = v; break; }
 
@@ -1408,8 +1459,12 @@ static bool game_focused_for_input(HWND gameHwnd) {
 }
 
 static void menu_handle_input(HWND gameHwnd) {
+    static bool prevAimKey = false;
+    static bool inputWasFocused = false;
     if (!game_focused_for_input(gameHwnd) || IsIconic(gameHwnd)) {
+        inputWasFocused = false;
         aimbot_set_hotkey_down(false);   // 失焦/最小化时立刻松开自瞄键
+        prevAimKey = false;
         return;
     }
     std::lock_guard<std::mutex> cfgLock(g_clickerCfgMutex);
@@ -1421,12 +1476,24 @@ static void menu_handle_input(HWND gameHwnd) {
     static DWORD nextRepeat = 0;
     static int  repeatDir = 0;
 
+    // 刚从失焦恢复时先采样所有边沿基线；按住模式仍会同步电平，
+    // 但不会把失焦期间一直按着的切换键误当成一次新按下。
+    if (!inputWasFocused) {
+        prevAimKey = key_down_any(g_cfg.aim.triggerKey);
+        prevAimToggleKey = key_down_any(g_cfg.aim.toggleKey);
+        prevInsert = key_down_any(g_cfg.menuKey);
+        prevEspKey = key_down_any(g_cfg.espKey);
+        prevProfileKey = key_down_any(g_cfg.profileKey);
+        inputWasFocused = true;
+    }
+
     // 每帧最多处理 4 个真实鼠标事件：既保持跟手，又不会阻塞游戏渲染线程
     menu_process_mouse_events();
     menu_tooltip_tick();
 
     // ---- 热键捕获模式 ----
     if (g_menuCaptureKey.load(std::memory_order_acquire)) {
+        aimbot_set_hotkey_down(false);
         prevInsert = key_down_any(g_cfg.menuKey);
         prevUp = key_down_any(VK_UP);
         prevDown = key_down_any(VK_DOWN);
@@ -1437,6 +1504,7 @@ static void menu_handle_input(HWND gameHwnd) {
         prevTab = key_down_any(VK_TAB);
         prevProfileKey = key_down_any(g_cfg.profileKey);
         prevAimToggleKey = key_down_any(g_cfg.aim.toggleKey);
+        prevAimKey = key_down_any(g_cfg.aim.triggerKey);
         if (key_down_any(VK_ESCAPE)) {
             g_menuCaptureKey.store(false, std::memory_order_release);
             g_menuDirty.store(true, std::memory_order_release);
@@ -1445,15 +1513,21 @@ static void menu_handle_input(HWND gameHwnd) {
         }
         for (int vk = 1; vk <= 254; ++vk) {
             if (vk == VK_ESCAPE || menu_key_is_nav(vk)) continue;
-            if (key_down_any(vk)) { menu_capture_commit(vk); return; }
+            if (key_down_any(vk)) {
+                menu_capture_commit(vk);
+                // commit 可能修改自瞄键；以新键当前电平建立基线，避免绑定操作
+                // 本身在下一帧被当作一次切换边沿。
+                prevAimKey = key_down_any(g_cfg.aim.triggerKey);
+                prevAimToggleKey = key_down_any(g_cfg.aim.toggleKey);
+                return;
+            }
         }
         return;
     }
 
     // ---- 自瞄键：由渲染线程热键路径同步到自瞄线程 ----
-    // 后台线程直接轮询 GetAsyncKeyState 在某些全屏/输入法/鼠标侧键场景下会漏键，
-    // 这里复用与 Insert/ESP/F8 完全相同的按键检测路径，保证自瞄快捷键可靠。
-    static bool prevAimKey = false;
+    // 统一在覆盖层宿主线程做边沿检测；鼠标侧键与键盘键走同一状态机，
+    // 按住模式同步电平，切换模式只消费一次上升沿。
     const bool aimMenuOpen = g_menuVisible.load(std::memory_order_acquire);
     const bool aimKeyDown = g_cfg.aim.triggerKey != 0 &&
                             key_down_any(g_cfg.aim.triggerKey);
@@ -1476,7 +1550,7 @@ static void menu_handle_input(HWND gameHwnd) {
         g_cfg.aim.triggerMode == AIM_TRIGGER_TOGGLE) {
         aimbot_toggle_trigger();
         const bool on = aimbot_toggle_on();
-        show_toast(on ? L"自瞄已开启" : L"自瞄已关闭", on ? 0x52D88C : 0x9AA7B8);
+        show_toast(on ? L"自瞄已开启" : L"自瞄已关闭", on ? kUiTheme.success : kUiTheme.textMuted);
         if (aimAutoEnabled) {
             commit_config();
             aimAutoEnabled = false;
@@ -1487,7 +1561,7 @@ static void menu_handle_input(HWND gameHwnd) {
 
     if (aimAutoEnabled) {
         commit_config();
-        show_toast(L"自瞄已启用（按住自瞄键）", 0x52D88C);
+        show_toast(L"自瞄已启用（按住自瞄键）", kUiTheme.success);
     }
 
     aimbot_set_hotkey_down(!aimMenuOpen && aimKeyDown &&
@@ -1502,7 +1576,7 @@ static void menu_handle_input(HWND gameHwnd) {
         commit_config();
         wchar_t msg[64];
         swprintf(msg, 64, L"配置方案 %d", g_cfg.activeProfile + 1);
-        show_toast(msg, 0x66A3FF);
+        show_toast(msg, kUiTheme.accent);
     }
     prevProfileKey = profileKeyDown;
 
@@ -1514,7 +1588,7 @@ static void menu_handle_input(HWND gameHwnd) {
         g_cfg.enabled = next;
         esp_cfg_publish();
         config_save(g_cfg);
-        show_toast(next ? L"ESP 已开启" : L"ESP 已关闭", next ? 0x52D88C : 0x9AA7B8);
+        show_toast(next ? L"ESP 已开启" : L"ESP 已关闭", next ? kUiTheme.success : kUiTheme.textMuted);
         g_menuDirty.store(true, std::memory_order_release);
     }
     prevEspKey = espKeyDown;
@@ -1528,7 +1602,7 @@ static void menu_handle_input(HWND gameHwnd) {
         esp_cfg_publish();
         config_save(g_cfg);
         show_toast(g_cfg.aim.enabled ? L"自瞄总开关：开" : L"自瞄总开关：关",
-                   g_cfg.aim.enabled ? 0x52D88C : 0x9AA7B8);
+                   g_cfg.aim.enabled ? kUiTheme.success : kUiTheme.textMuted);
         g_menuDirty.store(true, std::memory_order_release);
         esp_log("[aim] 总开关热键 vk=%d -> %s",
                 g_cfg.aim.toggleKey, g_cfg.aim.enabled ? "开" : "关");
@@ -1610,20 +1684,27 @@ static void draw_menu_panel(Overlay& ov, int panelW, int panelH, const EspConfig
 
     int activeProfile = g_activeProfileAtomic.load(std::memory_order_acquire);
 
-    const uint32_t colBg = 0x10131C;
-    const uint32_t colBorder = 0x35618F;
-    const uint32_t colSel = 0x1E3A5F;
-    const uint32_t colHover = 0x24486F;
-    const uint32_t colText = 0xE7EFFB;
-    const uint32_t colDim = 0x9AA7B8;
-    const uint32_t colAcc = 0x66A3FF;
-    const uint32_t colOn = 0x52D88C;
-    const uint32_t colOff = 0x8A93A3;
-    const uint32_t colTrack = 0x2A3850;
-    const uint32_t colThumb = 0xDDE7F5;
+    const uint32_t colRaised = kUiTheme.surfaceRaised;
+    const uint32_t colBorder = kUiTheme.keylineBright;
+    const uint32_t colRule = kUiTheme.keyline;
+    const uint32_t colSel = kUiTheme.surfaceSelected;
+    const uint32_t colHover = kUiTheme.surfaceHover;
+    const uint32_t colText = kUiTheme.text;
+    const uint32_t colDim = kUiTheme.textDim;
+    const uint32_t colAcc = kUiTheme.accent;
+    const uint32_t colOn = kUiTheme.success;
+    const uint32_t colOff = kUiTheme.textMuted;
+    const uint32_t colTrack = kUiTheme.track;
+    const uint32_t colThumb = kUiTheme.thumb;
 
-    ov.fillRectOpaque(0, 0, (float)panelW, (float)panelH, colBg);
+    // 主面板、标题舱和分页舱分层，左侧信号轨贯穿整块面板。
+    ov.fillRectOpaque(0, 0, (float)panelW, (float)panelH, kUiTheme.surface);
+    ov.fillRectAlpha(0, 0, (float)panelW, (float)kMenuHeaderH, colRaised, 0.92f);
+    ov.fillRectAlpha(0, (float)kMenuHeaderH, (float)panelW,
+                     (float)(kMenuHeaderH + kMenuTabH), colRaised, 0.52f);
+    ov.fillRectOpaque(0, 0, 2.0f, (float)panelH, colAcc);
     ov.drawLine(0, 0, (float)panelW, 0, colBorder, 1);
+    ov.drawLine(0, (float)kMenuHeaderH, (float)panelW, (float)kMenuHeaderH, colRule, 1);
     ov.drawLine(0, (float)panelH - 1, (float)panelW, (float)panelH - 1, colBorder, 1);
     ov.drawLine(0, 0, 0, (float)panelH, colBorder, 1);
     ov.drawLine((float)panelW - 1, 0, (float)panelW - 1, (float)panelH, colBorder, 1);
@@ -1634,21 +1715,27 @@ static void draw_menu_panel(Overlay& ov, int panelW, int panelH, const EspConfig
     int drag = g_menuDrag.load(std::memory_order_relaxed);
 
     wchar_t buf[128];
-    swprintf(buf, 128, L"连点器菜单  [Insert 关闭]  CPS %d", cs.realtimeCps);
-    ov.drawText(10, 4, buf, colAcc, 13);
+    ov.fillCircle(11.0f, 12.0f, 3.0f, colAcc);
+    ov.drawText(20, 4, L"MC ESP  /  控制台", colText, 13);
+    swprintf(buf, 128, L"%d CPS  ·  Insert 关闭", cs.realtimeCps);
+    ov.drawText((float)panelW - 12.0f - ov.measureText(buf, 12), 6, buf, colDim, 12);
     ov.drawLine(8, (float)kMenuHeaderH - 2, (float)panelW - 8, (float)kMenuHeaderH - 2, colBorder, 1);
 
     // ---- 标签页 ----
     for (int i = 0; i < PAGE_COUNT; ++i) {
         int x0 = 0, x1 = 0;
         menu_tab_rect_local(panelW, i, x0, x1);
-        if (i == page) {
-            ov.fillRectOpaque((float)x0 + 1, (float)kMenuHeaderH + 1, (float)x1 - 1, (float)(kMenuHeaderH + kMenuTabH - 1), colSel);
-            ov.drawLine((float)x0, (float)(kMenuHeaderH + kMenuTabH - 1), (float)x1, (float)(kMenuHeaderH + kMenuTabH - 1), colAcc, 1);
-        }
+        const bool selected = i == page;
+        if (selected)
+            ov.fillRectAlpha((float)x0 + 1, (float)kMenuHeaderH + 1,
+                             (float)x1 - 1, (float)(kMenuHeaderH + kMenuTabH - 1),
+                             colSel, 0.82f);
+        ov.drawLine((float)x0 + 2.0f, (float)(kMenuHeaderH + kMenuTabH - 1),
+                    (float)x1 - 2.0f, (float)(kMenuHeaderH + kMenuTabH - 1),
+                    selected ? colAcc : colRule, selected ? 2 : 1);
         float tw = ov.measureText(kPageNames[i], 13);
         ov.drawText(x0 + ((x1 - x0) - tw) * 0.5f, (float)kMenuHeaderH + 3,
-                    kPageNames[i], i == page ? colAcc : colDim, 13);
+                    kPageNames[i], selected ? colAcc : colDim, 13);
     }
 
     int rowsTop = kMenuHeaderH + kMenuTabH;
@@ -1720,6 +1807,9 @@ static void draw_menu_panel(Overlay& ov, int panelW, int panelH, const EspConfig
         case MI_AIM_TARGET2: value = kAimTarget2Names[cfg.aim.secondTarget % AIM_SECOND_COUNT]; color = colAcc; break;
         case MI_AIM_TARGET2_SMOOTH: swprintf(buf, 128, L"%d / 10", cfg.aim.secondSmooth); value = buf; color = colAcc; break;
         case MI_AIM_STABILITY: swprintf(buf, 128, L"%d px", cfg.aim.stability); value = buf; color = colAcc; break;
+        case MI_AIM_ASSIST: swprintf(buf, 128, L"%d / 10", cfg.aim.assist); value = buf; color = colAcc; break;
+        case MI_AIM_HEIGHT: swprintf(buf, 128, L"%d%%", cfg.aim.aimHeight); value = buf; color = colAcc; break;
+        case MI_AIM_STICKY: value = cfg.aim.sticky ? on : off; color = cfg.aim.sticky ? colOn : colOff; break;
         case MI_AIM_VISIBLE: value = cfg.aim.visibleOnly ? on : off; color = cfg.aim.visibleOnly ? colOn : colOff; break;
         case MI_AIM_VISUAL: value = kAimVisualNames[cfg.aim.visualMode % 4]; color = colAcc; break;
         }
@@ -1727,23 +1817,25 @@ static void draw_menu_panel(Overlay& ov, int panelW, int panelH, const EspConfig
         float ry = (float)(rowsTop + i * kMenuRowH);
         if (i == cursor) {
             ov.fillRectOpaque(3, ry, (float)panelW - 3, ry + kMenuRowH + 1, colSel);
+            ov.fillRectOpaque(3, ry, 5.0f, ry + kMenuRowH + 1, colAcc);
         } else if (i == hover || i == drag) {
-            ov.fillRectAlpha(3, ry, (float)panelW - 3, ry + kMenuRowH + 1, colHover, 0.65f);
+            ov.fillRectAlpha(3, ry, (float)panelW - 3, ry + kMenuRowH + 1, colHover, 0.72f);
+            ov.fillRectOpaque(3, ry, 4.0f, ry + kMenuRowH + 1, colRule);
         }
 
         if (g_menuCaptureKey.load() && g_menuCaptureTarget.load() == item)
             value = L"按任意键…";
 
-        ov.drawText(10, ry, label, i == cursor ? colText : colDim, 13);
+        ov.drawText(12, ry, label, i == cursor ? colText : colDim, 13);
         if (menu_is_slider(item)) {
             ov.drawText(126, ry, value, i == cursor ? colAcc : color, 13);
             int x0 = 0, x1 = 0;
             menu_slider_rect_local(panelW, i, x0, x1);
             float t = menu_slider_norm(item, cfg);
             float thumbX = x0 + t * (float)(x1 - x0);
-            ov.fillRectOpaque((float)x0, ry + 7, (float)x1, ry + 10, colTrack);
+            ov.fillRectAlpha((float)x0, ry + 7, (float)x1, ry + 10, colTrack, 0.92f);
             ov.fillRectOpaque((float)x0, ry + 7, thumbX, ry + 10, colAcc);
-            ov.fillRectOpaque(thumbX - 3, ry + 3, thumbX + 3, ry + 14, colThumb);
+            ov.fillCircle(thumbX, ry + 8.5f, 3.2f, colThumb);
         } else {
             float vw = ov.measureText(value, 13);
             ov.drawText((float)panelW - 12 - vw, ry, value, i == cursor ? colAcc : color, 13);
@@ -1752,7 +1844,10 @@ static void draw_menu_panel(Overlay& ov, int panelW, int panelH, const EspConfig
 
     // ---- 悬浮提示条 ----
     int tipY = rowsTop + kMenuMaxRows * kMenuRowH + 3;
-    ov.fillRectAlpha(8, (float)tipY, (float)panelW - 8, (float)(tipY + kMenuTipH - 4), colTrack, 0.55f);
+    ov.fillRectAlpha(8, (float)tipY, (float)panelW - 8,
+                     (float)(tipY + kMenuTipH - 4), colRaised, 0.92f);
+    ov.fillRectOpaque(8, (float)tipY, 2.0f, (float)(tipY + kMenuTipH - 4), colAcc);
+    ov.drawLine(10, (float)tipY, (float)panelW - 8, (float)tipY, colRule, 1);
     DWORD hoverStart = g_menuHoverStartMs.load(std::memory_order_relaxed);
     int tipItem = (hover >= 0) ? menu_item_for_row(hover) : -1;
     bool showTip = tipItem >= 0 && hoverStart != 0 && (int)(GetTickCount() - hoverStart) >= 350;
@@ -1765,13 +1860,14 @@ static void draw_menu_panel(Overlay& ov, int panelW, int panelH, const EspConfig
     }
 
     int fy = tipY + kMenuTipH - 1;
-    swprintf(buf, 128, L"状态  游戏:%s  攻击:%s  放置:%s  连点:%s  自瞄:%s",
+    ov.drawLine(8, (float)(fy - 2), (float)panelW - 8, (float)(fy - 2), colRule, 1);
+    swprintf(buf, 128, L"游戏 %s   攻击 %s   放置 %s   连点 %s   自瞄 %s",
              cs.combatReady ? (cs.inGame ? L"内" : L"外") : L"未就绪",
              cs.combatReady ? (cs.canAttack ? L"可" : L"否") : L"未就绪",
              cs.combatReady ? (cs.canPlace ? L"可" : L"否") : L"未就绪",
              cs.running ? L"开" : L"关",
              cfg.aim.enabled ? L"开" : L"关");
-    ov.drawText(10, (float)fy, buf, colDim, 12);
+    ov.drawText(12, (float)fy, buf, colOff, 12);
 }
 
 static bool menu_need_render(int w, int h) {
@@ -1824,7 +1920,7 @@ static void blit_menu_cache(int w, int h) {
 // ============================================================
 static void draw_toast(Overlay& ov, int w, int h) {
     std::wstring text;
-    uint32_t color = 0x66A3FF;
+    uint32_t color = 0;
     {
         std::lock_guard<std::mutex> lock(g_toastMutex);
         if (!toast_active()) return;
@@ -1833,8 +1929,9 @@ static void draw_toast(Overlay& ov, int w, int h) {
     }
     if (text.empty()) return;
 
-    const uint32_t colBg = 0x0D1118;
-    const uint32_t colBorder = color;
+    const uint32_t colBorder = kUiTheme.keyline;
+    // 事件回调仍传入自定义语义色；缺省颜色使用主题强调色。
+    if ((color & 0xFFFFFFu) == 0) color = kUiTheme.accent;
     float tw = ov.measureText(text, 14);
     float bw = tw + 28.0f;
     float bh = 30.0f;
@@ -1843,12 +1940,15 @@ static void draw_toast(Overlay& ov, int w, int h) {
     if (x < 8.0f) x = 8.0f;
     if (y < 8.0f) y = 8.0f;
 
-    ov.fillRectAlpha(x, y, x + bw, y + bh, colBg, 0.90f);
-    ov.drawLine(x, y, x + bw, y, colBorder, 1);
-    ov.drawLine(x, y + bh, x + bw, y + bh, colBorder, 1);
-    ov.drawLine(x, y, x, y + bh, colBorder, 1);
+    // 与菜单/HUD 共用深色信息舱；事件色只承担左侧信号轨，
+    // 不再把整圈边框点亮，避免 Toast 抢过游戏画面。
+    ov.fillRectAlpha(x, y, x + bw, y + bh, kUiTheme.surface, 0.94f);
+    ov.fillRectOpaque(x, y, x + 3.0f, y + bh, color);
+    ov.drawLine(x + 3.0f, y, x + bw, y, colBorder, 1);
+    ov.drawLine(x + 3.0f, y + bh, x + bw, y + bh, colBorder, 1);
     ov.drawLine(x + bw, y, x + bw, y + bh, colBorder, 1);
-    ov.drawText(x + 14.0f, y + 8.0f, text, 0xE7EFFB, 14);
+    ov.fillCircle(x + 10.0f, y + 15.0f, 2.4f, color);
+    ov.drawText(x + 14.0f, y + 8.0f, text, kUiTheme.text, 14);
 }
 
 // ============================================================
@@ -1869,7 +1969,8 @@ static bool status_bar_wanted() {
 
 static uint64_t status_bar_signature(bool espOn, bool toastActive,
                                      const ClickerSnapshot& cs, int profile,
-                                     bool aimEnabled, bool aimActive) {
+                                     bool aimEnabled, bool aimActive,
+                                     bool aimHasTarget, bool aimLocked) {
     uint64_t h = 1469598103934665603ULL;   // FNV-1a 64bit
     auto mix = [&](uint64_t v) { h ^= v; h *= 1099511628211ULL; };
     mix(espOn ? 1ULL : 0ULL);
@@ -1883,6 +1984,8 @@ static uint64_t status_bar_signature(bool espOn, bool toastActive,
     mix((uint64_t)profile);
     mix(aimEnabled ? 1ULL : 0ULL);
     mix(aimActive ? 1ULL : 0ULL);
+    mix(aimHasTarget ? 1ULL : 0ULL);
+    mix(aimLocked ? 1ULL : 0ULL);
     return h;
 }
 
@@ -1903,15 +2006,17 @@ static bool status_bar_update(const EspConfig& cfg, bool toastActive) {
     int profile = g_activeProfileAtomic.load(std::memory_order_acquire);
     const bool aimEnabled = cfg.aim.enabled;
     const bool aimActive = aimbot_active();
+    const bool aimHasTarget = aimActive && aimbot_has_target();
+    const bool aimLocked = aimHasTarget && aimbot_target_locked();
     uint64_t sig = status_bar_signature(espOn, toastActive, cs, profile,
-                                        aimEnabled, aimActive);
+                                        aimEnabled, aimActive,
+                                        aimHasTarget, aimLocked);
 
-    const uint32_t colOn    = 0x52D88C;   // 绿
-    const uint32_t colOff   = 0x7A8799;   // 灰蓝
-    const uint32_t colNo    = 0xFF6B6B;   // 红（不可攻击/不可放置）
-    const uint32_t colAmber = 0xFFB454;   // 琥珀（游戏外）
-    const uint32_t colDim   = 0x5A6575;   // 未就绪
-    const uint32_t colAcc   = 0x66A3FF;   // 蓝（方案）
+    const uint32_t colOn    = kUiTheme.success; // 已启用
+    const uint32_t colOff   = kUiTheme.textMuted; // 已关闭/未就绪
+    const uint32_t colNo    = kUiTheme.danger;  // 不可攻击/不可放置
+    const uint32_t colAmber = kUiTheme.warning; // 游戏外/待机
+    const uint32_t colAcc   = kUiTheme.accent; // 方案
 
     wchar_t buf[64];
     std::wstring clickerVal = L"关";
@@ -1927,13 +2032,13 @@ static bool status_bar_update(const EspConfig& cfg, bool toastActive) {
         return ok ? L"可" : L"否";
     };
     auto gateColor = [&](bool ready, bool ok) {
-        if (!ready) return colDim;
+        if (!ready) return colOff;
         return ok ? colOn : colNo;
     };
     // 连点器停止时门控/游戏状态没有意义，统一显示 —；运行时 combatReady 每 5ms 更新。
     const bool combatShow = cs.running && cs.combatReady;
     std::wstring gameVal = L"—";
-    uint32_t gameColor = colDim;
+    uint32_t gameColor = colOff;
     if (combatShow) {
         if (cs.inGame) { gameVal = L"内"; gameColor = colOn; }
         else           { gameVal = L"外"; gameColor = colAmber; }
@@ -1942,8 +2047,10 @@ static bool status_bar_update(const EspConfig& cfg, bool toastActive) {
     std::wstring aimVal = L"关";
     uint32_t aimColor = colOff;
     if (aimEnabled) {
-        if (aimActive) { aimVal = L"锁定中"; aimColor = colOn; }
-        else           { aimVal = L"待机";   aimColor = colAmber; }
+        if (!aimActive)       { aimVal = L"待机"; aimColor = colAmber; }
+        else if (!aimHasTarget) { aimVal = L"搜索"; aimColor = colAmber; }
+        else if (aimLocked)   { aimVal = L"进盒"; aimColor = colOn; }
+        else                  { aimVal = L"跟随"; aimColor = colAcc; }
     }
 
     swprintf(buf, 64, L"P%d", profile + 1);
@@ -1986,29 +2093,34 @@ static bool status_bar_update(const EspConfig& cfg, bool toastActive) {
         uint32_t accent = cs.running ? colOn
                         : (espOn ? colAcc
                                  : (aimActive ? colAcc : (cfg.colHud & 0xFFFFFF)));
-        g_overlay.fillRectAlpha(0.0f, 0.0f, panelW, panelH, 0x0C1118, 0.86f);
-        g_overlay.fillRectAlpha(0.0f, 0.0f, 2.0f, panelH, accent, 0.90f);
-        g_overlay.fillRectAlpha(0.0f, 0.0f, panelW, 1.0f, 0x3A4C63, 0.90f);
-        g_overlay.drawLine(0.0f, panelH - 1.0f, panelW, panelH - 1.0f, 0x2A3A4D, 1);
-        g_overlay.drawLine(0.0f, 0.0f, 0.0f, panelH, 0x2A3A4D, 1);
-        g_overlay.drawLine(panelW - 1.0f, 0.0f, panelW - 1.0f, panelH, 0x2A3A4D, 1);
+        // HUD 与菜单/Toast 共享 surface/keyline/状态色，保持一套仪表盘语言。
+        g_overlay.fillRectAlpha(0.0f, 0.0f, panelW, panelH,
+                                kUiTheme.surface, 0.90f);
+        g_overlay.fillRectOpaque(0.0f, 0.0f, 2.0f, panelH, accent);
+        g_overlay.fillRectAlpha(2.0f, 0.0f, panelW, 1.0f,
+                                kUiTheme.keylineBright, 0.88f);
+        g_overlay.drawLine(0.0f, panelH - 1.0f, panelW, panelH - 1.0f,
+                           kUiTheme.keyline, 1);
+        g_overlay.drawLine(0.0f, 0.0f, 0.0f, panelH, kUiTheme.keyline, 1);
+        g_overlay.drawLine(panelW - 1.0f, 0.0f, panelW - 1.0f, panelH,
+                           kUiTheme.keyline, 1);
 
-        // 分项：指示灯 + 灰标签 + 高亮值，分项间画细分隔线
+        // 分项：指示灯 + 弱标签 + 高亮值，分项间画细分隔线
         float x = kHudPadX;
         const float cy = panelH * 0.5f;
         const float ty = (panelH - 20.0f) * 0.5f;   // 13px 文本位图约 20px 高，垂直居中
         for (int i = 0; i < 7; ++i) {
             const float dotX = x + kHudDotD * 0.5f;
-            g_overlay.fillCircle(dotX, cy, 3.4f, 0x111A26);        // 深色外圈
-            g_overlay.fillCircle(dotX, cy, 2.1f, cells[i].color);  // 状态色灯芯
+            g_overlay.fillCircle(dotX, cy, 3.4f, kUiTheme.surfaceRaised);
+            g_overlay.fillCircle(dotX, cy, 2.1f, cells[i].color);
             const float lx = x + kHudDotD + kHudDotGap;
-            g_overlay.drawText(lx, ty, cells[i].label, 0x8E9BAE, kHudFont);
+            g_overlay.drawText(lx, ty, cells[i].label, kUiTheme.textDim, kHudFont);
             const float vx = lx + labelW[i] + kHudLabelGap;
             g_overlay.drawText(vx, ty, cells[i].value, cells[i].color, kHudFont);
             x = vx + valueW[i];
             if (i < 6) {
                 const float dx = x + kHudCellGap * 0.5f;
-                g_overlay.drawLine(dx, 7.0f, dx, panelH - 7.0f, 0x273449, 1);
+                g_overlay.drawLine(dx, 7.0f, dx, panelH - 7.0f, kUiTheme.keyline, 1);
                 x += kHudCellGap;
             }
         }
@@ -2095,7 +2207,7 @@ static void draw_aim_visual(Overlay& ov, int w, int h, const EspConfig& cfg) {
             swprintf(hp, 24, L"%d%%", pct);
             float tw = ov.measureText(hp, 12);
             ov.drawText(t.sx - tw * 0.5f, t.sy + 14.0f, hp,
-                        t.health > 0.0f ? 0x52D88C : 0xFF6B6B, 12);
+                        t.health > 0.0f ? kUiTheme.success : 0xFF6B6B, 12);
         }
     }
 }
@@ -2242,12 +2354,21 @@ void esp_on_swap() {
     }
 
     // 首次在此线程解析符号，之后每帧直接复用 JNIEnv
-    if (!jvm_hook_begin()) return;
+    if (!jvm_hook_begin()) {
+        if (aimActive) aimbot_clear_target();
+        return;
+    }
     // 符号未全部解析成功时跳过本帧，避免用空方法 ID 调用 JNI 崩溃
-    if (!jvm_ready()) return;
+    if (!jvm_ready()) {
+        if (aimActive) aimbot_clear_target();
+        return;
+    }
 
     CamData cam = jvm_read_camera();
-    if (!cam.ok) return;
+    if (!cam.ok) {
+        if (aimActive) aimbot_clear_target();
+        return;
+    }
 
     // 聊天界面（按 T 打开）：keepOnChat 配置决定是否仍渲染。
     if (cam.guiOpen && cam.screenIsChat && cfg.keepOnChat)

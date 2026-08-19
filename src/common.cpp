@@ -148,14 +148,18 @@ static void clamp_aim_settings(AimSettings& a) {
     if (a.predictionTicks > 20) a.predictionTicks = 20;
     if (a.switchCooldownMs < 0) a.switchCooldownMs = 0;
     if (a.switchCooldownMs > 2000) a.switchCooldownMs = 2000;
-    if (a.secondTarget < 0) a.secondTarget = 0;
-    if (a.secondTarget >= AIM_SECOND_COUNT) a.secondTarget = AIM_SECOND_LEVEL;
+    if (a.secondTarget < 0 || a.secondTarget >= AIM_SECOND_COUNT)
+        a.secondTarget = AIM_SECOND_CUSTOM_HEIGHT;
     if (a.secondSmooth < 1) a.secondSmooth = 1;
     if (a.secondSmooth > 10) a.secondSmooth = 10;
     if (a.stability < 0) a.stability = 0;
     if (a.stability > 30) a.stability = 30;
     if (a.visualMode < 0) a.visualMode = 0;
     if (a.visualMode > 3) a.visualMode = 3;
+    if (a.assist < 0) a.assist = 0;
+    if (a.assist > 10) a.assist = 10;
+    if (a.aimHeight < 45) a.aimHeight = 45;
+    if (a.aimHeight > 80) a.aimHeight = 80;
 }
 
 static void clamp_clicker_settings(ClickerSettings& cl) {
@@ -258,6 +262,9 @@ void config_load(EspConfig& cfg) {
                 else if (key == "stability") seti(cfg.aim.stability);
                 else if (key == "visualMode") seti(cfg.aim.visualMode);
                 else if (key == "visibleOnly") set(cfg.aim.visibleOnly);
+                else if (key == "assist") seti(cfg.aim.assist);
+                else if (key == "aimHeight") seti(cfg.aim.aimHeight);
+                else if (key == "sticky") set(cfg.aim.sticky);
             } else if (section == "clicker" || section.rfind("clickerProfile", 0) == 0) {
                 if (section == "clicker" && key == "profileKey") {
                     seti(cfg.profileKey);
@@ -402,15 +409,18 @@ void config_save(const EspConfig& cfg) {
     line((std::string("fov = ") + std::to_string(cfg.aim.fov) + "                    ; 自瞄视野全角（度）").c_str());
     line((std::string("maxDistance = ") + std::to_string(cfg.aim.maxDistance) + "              ; 自瞄最大距离（格）").c_str());
     line((std::string("smooth = ") + std::to_string(cfg.aim.smooth) + "                 ; 平滑度 1..10，越大越缓").c_str());
-    line((std::string("reactionMs = ") + std::to_string(cfg.aim.reactionMs) + "              ; 锁定新目标反应延迟（毫秒）").c_str());
-    line((std::string("mouseSensitivity = ") + std::to_string(cfg.aim.mouseSensitivity) + "          ; 鼠标移动倍率 0.5..2.0").c_str());
+    line((std::string("reactionMs = ") + std::to_string(cfg.aim.reactionMs) + "              ; 获取/切换新目标后的反应延迟（毫秒）").c_str());
+    line((std::string("mouseSensitivity = ") + std::to_string(cfg.aim.mouseSensitivity) + "          ; 自瞄速度微调 0.5..2.0（游戏实际灵敏度自动读取）").c_str());
     line((std::string("predictionTicks = ") + std::to_string(cfg.aim.predictionTicks) + "          ; 预判目标移动 0..20 tick").c_str());
     line((std::string("switchCooldownMs = ") + std::to_string(cfg.aim.switchCooldownMs) + "        ; 切换目标冷却（毫秒）").c_str());
-    line((std::string("secondTarget = ") + std::to_string(cfg.aim.secondTarget) + "           ; 0=放平中心 1=不放平(第一目标高度) 2=保持最近点").c_str());
-    line((std::string("secondSmooth = ") + std::to_string(cfg.aim.secondSmooth) + "           ; 第一目标→第二目标过渡平滑度 1..10").c_str());
-    line((std::string("stability = ") + std::to_string(cfg.aim.stability) + "              ; 对齐第二目标后的微小移动死区（像素）0..30").c_str());
+    line((std::string("secondTarget = ") + std::to_string(cfg.aim.secondTarget) + "           ; 0=自身视平线 1=真实进盒高度 2=保持进盒点 3=自定义高度中心").c_str());
+    line((std::string("secondSmooth = ") + std::to_string(cfg.aim.secondSmooth) + "           ; 真实进盒点→第二落点过渡平滑度 1..10").c_str());
+    line((std::string("stability = ") + std::to_string(cfg.aim.stability) + "              ; 最小计数收敛后的重新追踪半径（像素）0..30").c_str());
     line((std::string("visualMode = ") + std::to_string(cfg.aim.visualMode) + "              ; 0=关 1=目标点 2=+瞄准线 3=+FOV 圈").c_str());
     line((std::string("visibleOnly = ") + b2s(cfg.aim.visibleOnly) + "           ; 仅瞄准视线可达目标").c_str());
+    line((std::string("assist = ") + std::to_string(cfg.aim.assist) + "                 ; 辅助强度 0..10，0=不移动 6=推荐磁吸 10=强纠").c_str());
+    line((std::string("aimHeight = ") + std::to_string(cfg.aim.aimHeight) + "              ; 瞄准高度 45..80（碰撞箱底部向上百分比）").c_str());
+    line((std::string("sticky = ") + b2s(cfg.aim.sticky) + "                 ; 黏锁：当前目标需明显变差才切换").c_str());
 
     line("[colors]");
     char cb[64];
